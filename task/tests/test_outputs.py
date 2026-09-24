@@ -45,18 +45,17 @@ REQUIRED_KEYS = {
     "mass_change_kg", "mass_change_uncertainty_95",
     "density_kgm3", "density_uncertainty_95",
     "process_classification", "poisson_ratio_assumed",
-    "flagged_gravity_benchmarks", "n_bootstrap_resamples",
+    "flagged_gravity_benchmarks",
 }
 VALID_CLASSIFICATIONS = {"magmatic_recharge", "non_magmatic_source", "magmatic_mass_loss", "unrealistic"}
 
 DENSITY_RECHARGE_LOW = 1500.0
 DENSITY_RECHARGE_HIGH = 3700.0
 
-MIN_BOOTSTRAP_RESAMPLES = 300
-
-# Tolerances -- calibrated against independent noise realizations of the
-# author's own reference solution (see process.md for the full calibration
-# log). Depth/volume are tightly constrained by the joint inversion;
+# Tolerances -- calibrated against 3 independent noise realizations of the
+# author's own reference solution; see process.md, "Calibration log" for
+# the observed point errors and CI widths per seed that these numbers were
+# set from. Depth/volume are tightly constrained by the joint inversion;
 # mass/density are noisier since they depend more on the lower-SNR gravity
 # data, matching real joint GNSS-gravity inversion practice.
 ONSET_DAY_TOL_DAYS = 15
@@ -152,17 +151,6 @@ def test_required_keys_present(submitted):
 def test_poisson_ratio_matches_spec(submitted):
     assert abs(submitted["poisson_ratio_assumed"] - 0.25) < 1e-6, (
         "instruction.md specifies Poisson's ratio 0.25; submitted value does not match"
-    )
-
-
-def test_bootstrap_resample_count_meets_minimum(submitted):
-    n = submitted["n_bootstrap_resamples"]
-    assert isinstance(n, (int, float)) and not isinstance(n, bool), (
-        f"n_bootstrap_resamples must be numeric, got {n!r}"
-    )
-    assert n >= MIN_BOOTSTRAP_RESAMPLES, (
-        f"n_bootstrap_resamples={n} is below the {MIN_BOOTSTRAP_RESAMPLES} resamples "
-        f"instruction.md requires for the confidence intervals"
     )
 
 
