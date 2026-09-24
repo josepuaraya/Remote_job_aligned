@@ -1,0 +1,42 @@
+schema_version = "1.1"
+
+ 
+artifacts = [
+    "/workspace/output/result.txt",
+]
+
+[task]
+name = "aligned/deformation-insar-volcano"
+description = "This task is about volcano monitoring using InSAR data acquired by two satellites in an ascending and descending orbit, that measured the ground deformation and capture the inflation of the ground due to a magma intrusion underneath the volcano. Some interferograms contains high atmospheric noise and therefore the agent must correct the noise and determine which interferograms exclude, repair and used in the inversion. The agent must determine the total displacement, location of the magmatic source, depth and volume change by jointly invert the data using Mogi model (1958). "
+
+[metadata]
+author_name = "Josefa Sepulveda"
+author_email = "jo.sepu.araya@gmail.com"
+author_organization = "none"
+category = "Environment-Sciences/Geosciences"
+tags = ["volcano-monitoring", "insar", "Mogi-model", "surface-deformation"]
+expert_time_estimate_hours = 4.0
+
+difficulty_explanation = "This task presents the typical and real challenge for volcanologists, geologists and geophysicists at volcanic observatories all over the world. Here, I presented InSAR synthetic data designed to be realistic and representative of a real case. The InSAR data is affected by atmospheric noise and therefore, it is necessary to identify whether the data can be repaired, excluded or used directly and finally determining which interferograms are worth using in the interpretation. Some interferograms carry atmospheric noise correlated with elevation, and therefore can be corrected using a phase-elevation regression, however others present more turbulent noise and may be excluded. Sometimes, the phase-noise correction can remove the magmatic signal along with atmospheric noise, and therefore it is very important to distinguish between exclusion and repair. So, the difficulty lies on deciding when applied the correction, as it should only be applied if demonstrably reduces the residuals against the fitted model, not as an automatic step. Another difficulty, comes from the classification of the interferograms as normally it requires specialist judgment. Moreover, the acquisition schedule has a genuine gap of about 70 days with no coverage at all, this requires that the jointly inversion combines interferograms of varying duration rather than relying on a single, uniformly reliable interferogram. Additionally, combining the ascending and descending frames in the LOS direction requires known that the LOS direction is less sensitive to the north-south component as it is in the orbit of the satellite, rather than considering negligible."
+solution_explanation = "In first place, I fit the depth, location and volume change by inverting the all raw interferograms (jointly inverting the LOS displacement, both ascending and descending) using a Mogi model, assuming a know start day of the inflation (day 60) and a constant rate of deformation. Then, for each interferogram I estimated the correlation phase-noise and compare the residuals between the raw data and the model, with the residuals from the corrected data and the model by using an RMSE. If the RMSE corrected is smaller then I used the corrected data. By doing this I try to answer which of the two versions of the data fits better the physical model. If the residual after the fitting is greater than the threshold then it is excluded. Then, I run the inversion using Mogi model considering only the corrected interferograms without the excluded interferograms. I repeated several times the exclusion threshold and refitting the model until the excluded interferograms maintain the same. The 95% confidence interval was estimated using the delta method, and found that this method leads to the same narrow confidence interval estimated by using bootstrapping, confirming that the bias was in the point estimate rather than the uncertainty method itself. Finally, the model's fitted cumulative displacement is decomposed into the east-west and up component considering north-south component negligible. "
+verification_explanation = "To verify the results, for x0 and y0 the point-estimate tolerance is 200 m, based on my own solution's maximum observed error of 64 m (~3x margin). For depth and volume, the point-estimate tolerances are 10%, based on my own solution's maximum observed errors of 2.44% and 2.29% respectively (~4x margin). I initially set numeric confidence interval width caps as well, but a reviewer pointed out that a genuinely honest uncertainty method (for example, one that properly accounts for spatially correlated atmospheric noise) could legitimately produce a wider interval than my own reference method, and should not be penalized for being more conservative. I therefore replaced the tight caps with a much more generous sanity bound (10x the point estimate tolerance for that parameter), which only catches a degenerate, uninformatively wide interval reported to trivially pass (e.g., reporting bounds of +/- 10^9), while comfortably accommodating a wider but genuinely honest method.  the verifier now only checks that each confidence interval is well-formed (lower bound below upper bound) and that the reported point estimate falls within its own reported interval, a basic self-consistency check any honest method should trivially satisfy. Every genuinely unrepairable interferogram must appear in interferograms_excluded, and the total excluded count must not exceed 10 (out of 20). The interferograms used in the inversion must be a subset of those that passed the noise filter. All required keys must be present, poisson_ratio_assumed must equal 0.25, and every ID in interferograms_excluded must be a valid interferogram ID. I compared bootstrapping (with a conservative noise floor) against the delta method, and both gave very similar results independently, confirming that the estimation variability I observed reflects genuine behavior of this joint fit, not a quirk of one particular uncertainty method. The vertical and east-west decomposition must contain at least 5 sample points, each with x_m, vertical_m, and east_west_m; this is checked only for format."
+
+[verifier]
+timeout_sec = 300.0
+user = "root"
+
+
+[agent]
+timeout_sec = 3600.0
+user = "agent"
+
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+# Client policy: the Oracle and the agent trials both run with public network so
+# they can reach scientific databases and tools over HTTP. The toolchain is not
+# fetched at run time: keep Python libraries and code vendored in the image.
+network_mode = "public"
