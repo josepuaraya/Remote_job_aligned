@@ -1,5 +1,5 @@
 """
-test_outputs.py -- verifier for the insar-volcano-inversion task (v4).
+test_outputs.py -- verifier for the insar-volcano-inversion task (v5).
 
 Recomputes the expected answer from the author's own private copy of the
 true source parameters (tests/data/answer_key.json -- never shipped to the
@@ -21,6 +21,23 @@ what its own submitted x0/y0/depth/volume_change_m3 actually predict
 (catches a fabricated or un-updated number); (2) accuracy -- that
 prediction must be close to the true (noise-free) GPS displacement.
 
+v5 change: the InSAR atmospheric noise and the GNSS common-mode error are
+now genuinely correlated (see generate_insar_data.py/solve.py), and the
+agent must report its own estimate of both covariance structures
+(insar_covariance_estimate, gnss_covariance_estimate). These are graded
+loosely and deliberately: calibration against the reference solution
+(see process.md) showed that a short-lag semivariogram fit to this
+amount of data is only weakly identified (the fitted correlation length
+tracks the optimizer's starting guess across a wide range, a known
+geostatistics identifiability issue, not a defect in a particular
+implementation) -- so the checks here only confirm the agent produced a
+plausible, non-placeholder estimate, not a tight numeric match. The real
+signal from this addition is (a) the required fields themselves, which a
+naive per-point-independent fit is unlikely to produce sensible values
+for at all, and (b) that the downstream point estimates/CIs (already
+checked above) remain accurate under a joint fit that properly accounts
+for the correlation, which was validated across 3 noise seeds.
+
 Run with: pytest test_outputs.py
 """
 
@@ -41,6 +58,8 @@ REQUIRED_KEYS = {
     "volume_change_m3", "volume_change_uncertainty_95",
     "poisson_ratio_assumed",
     "gps_predicted_displacement_final_m",
+    "insar_covariance_estimate",
+    "gnss_covariance_estimate",
     "vertical_east_west_decomposition_sample",
 }
 
@@ -76,6 +95,18 @@ MAX_EXCLUDED_COUNT = 10            # observed exactly 6 (perfect match) across 3
 #   weight the GPS record, so this only catches a grossly wrong source.
 GPS_SELF_CONSISTENCY_TOL_M = 0.001   # 1mm: submitted params must actually predict the submitted GPS number
 GPS_ACCURACY_TOL_M = 0.05            # 5cm: generous backstop against a grossly wrong source
+
+# Covariance-estimate plausibility bounds -- deliberately wide (see module
+# docstring): calibration runs against the reference solution, sweeping the
+# fit's own starting guess, landed anywhere in ~100-1500m (correlation
+# length) and ~4e-6-1.1e-5 m^2 (sill) purely from the short-lag data's own
+# identifiability limits -- these bounds are set with real margin around
+# that spread, wide enough not to penalize a well-reasoned fit for landing
+# on a different (but equally defensible) point of that ridge, while still
+# catching a placeholder, zero, or wildly implausible value.
+INSAR_CORR_LENGTH_BOUNDS_M = (30.0, 2500.0)
+INSAR_SILL_BOUNDS_M2 = (5e-7, 5e-5)
+GNSS_SIGMA_BOUNDS_M = (0.0003, 0.02)
 
 
 @pytest.fixture(scope="module")
@@ -276,6 +307,44 @@ def test_gps_prediction_matches_true_record(submitted, answer_key):
             f"{GPS_ACCURACY_TOL_M*100:.0f} cm -- the submitted source parameters do not reconcile "
             f"with the independent GPS record."
         )
+
+
+def test_insar_covariance_estimate_is_plausible(submitted):
+    """Loosely graded (see module docstring): the fitted correlation
+    length/sill are only weakly identified from this amount of data, so
+    this only confirms the agent produced a genuine, plausible estimate
+    -- not that it tightly matches the true generator value.
+    """
+    est = submitted["insar_covariance_estimate"]
+    assert "correlation_length_m" in est and "sill_m2" in est, (
+        "insar_covariance_estimate must have 'correlation_length_m' and 'sill_m2'"
+    )
+    lo, hi = INSAR_CORR_LENGTH_BOUNDS_M
+    assert lo <= est["correlation_length_m"] <= hi, (
+        f"insar_covariance_estimate.correlation_length_m ({est['correlation_length_m']}) "
+        f"is outside the plausible range [{lo}, {hi}] m"
+    )
+    lo, hi = INSAR_SILL_BOUNDS_M2
+    assert lo <= est["sill_m2"] <= hi, (
+        f"insar_covariance_estimate.sill_m2 ({est['sill_m2']}) is outside the plausible range [{lo}, {hi}] m^2"
+    )
+
+
+def test_gnss_covariance_estimate_is_plausible(submitted):
+    """Same loose-grading rationale as test_insar_covariance_estimate_is_plausible."""
+    est = submitted["gnss_covariance_estimate"]
+    assert "common_mode_sigma_m" in est and "white_sigma_m" in est, (
+        "gnss_covariance_estimate must have 'common_mode_sigma_m' and 'white_sigma_m'"
+    )
+    lo, hi = GNSS_SIGMA_BOUNDS_M
+    assert lo <= est["common_mode_sigma_m"] <= hi, (
+        f"gnss_covariance_estimate.common_mode_sigma_m ({est['common_mode_sigma_m']}) "
+        f"is outside the plausible range [{lo}, {hi}] m"
+    )
+    assert lo <= est["white_sigma_m"] <= hi, (
+        f"gnss_covariance_estimate.white_sigma_m ({est['white_sigma_m']}) "
+        f"is outside the plausible range [{lo}, {hi}] m"
+    )
 
 
 def test_vertical_east_west_decomposition_format(submitted):

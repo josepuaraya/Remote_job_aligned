@@ -1,46 +1,43 @@
 """
-solve.py -- reference solution for the insar-volcano-inversion task (v4).
+solve.py -- reference solution for the insar-volcano-inversion task (v5).
 
-v4 change (see process.md): after the InSAR-only screening/fit (v3
-pipeline, unchanged), adds a second stage that jointly refits (x0, y0,
-depth, rate) against the screened/corrected InSAR residuals AND an
-independent continuous GPS station's 3-component (E/N/U) record. This is
-standard real-world practice (joint InSAR+GNSS inversion) and is
-necessary here specifically because the InSAR spatial sampling (domain
-half-width 3500 m) is comparable to the true source depth (4500 m): the
-far-field part of the Mogi radial-decay curve is under-sampled, so depth
-and cumulative volume change are only weakly separable from InSAR alone.
-An InSAR-only fit can show good residuals while sitting on the wrong
-point of that depth/volume trade-off; the GPS record, being unaffected
-by atmospheric noise, pins that direction down.
+v5 change (see process.md): the InSAR atmospheric noise and the GNSS
+common-mode error are now genuinely correlated (spatial for InSAR,
+cross-station for GNSS), not i.i.d. A correct inversion estimates both
+covariance structures from the visible data and uses them to weight a
+generalized least squares (GLS) / Bayesian joint refit, rather than
+treating every observation as independent and equally weighted.
 
 Pipeline:
-1. Direct LOS joint inversion (x0, y0, depth, rate) using the full LOS
-   projection (including north-south sensitivity), against the RAW data
-   from all 20 sequential interferograms.
-2. For each interferogram, decide whether elevation correction helps
-   (compare residual RMS raw vs. corrected against the fitted model);
-   apply only if it reduces the residual.
-3. Refit with corrected data, then iterate: exclude any interferogram
-   whose residual RMS still exceeds the noise threshold, refit without
-   it, repeat until the excluded set stabilizes.
-4. Joint refinement: refit (x0, y0, depth, rate) against the screened
-   InSAR residuals AND the GPS station's E/N/U record together, each
-   weighted by its own assumed noise sigma, using the stage-3 solution
-   as the starting point. This is the estimate actually reported.
-5. 95% CIs via the delta method (analytic covariance from the Jacobian
-   of the joint fit).
-6. Secondary: decompose the fitted model's cumulative displacement over
-   the record into vertical/east-west components (reduced LOS formula),
-   and report the model's own predicted final-day GPS displacement for
-   comparison against the observed record.
+1. Same as v4: direct LOS joint inversion on raw data, per-interferogram
+   elevation-correction decision by residual RMS comparison, iterative
+   exclusion until the excluded set stabilizes.
+2. Estimate the InSAR noise's spatial covariance from the screened
+   residuals: an empirical semivariogram restricted to short lags (where
+   the true correlated-noise signal dominates over any leftover
+   large-scale structure from the elevation/turbulent correction terms),
+   fit to an exponential model to recover a correlation length and sill.
+3. Estimate the GNSS network's noise covariance (common-mode vs.
+   per-station white variance) via a method-of-moments decomposition of
+   the residuals against the stage-1 source model.
+4. Joint GLS refit: whiten the InSAR residuals (per interferogram, using
+   the Cholesky factor of the estimated spatial covariance) and the GNSS
+   residuals (per epoch/component, using the Cholesky factor of the
+   estimated compound-symmetry covariance), then refit (x0, y0, depth,
+   rate) against the combined whitened residuals, starting from the
+   stage-1 solution.
+5. 95% CIs via the delta method from this GLS fit's Jacobian.
+6. Secondary: decompose the fitted model's cumulative displacement into
+   vertical/east-west components, and report the model's own predicted
+   final-day displacement at the primary GNSS station.
 """
 
 import numpy as np
 import pandas as pd
 import json
 import os
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, curve_fit
+from scipy.linalg import solve_triangular, cholesky
 
 DATA_DIR = os.environ.get("TASK_DATA_DIR", "/workspace/data")
 OUTPUT_DIR = os.environ.get("TASK_OUTPUT_DIR", "/workspace/output")
@@ -48,8 +45,10 @@ OUTPUT_DIR = os.environ.get("TASK_OUTPUT_DIR", "/workspace/output")
 POISSON_RATIO = 0.25
 RNG = np.random.default_rng(555)
 NOISE_RMS_THRESHOLD_M = 0.008
-ONSET_DAY = 60.0  # known/disclosed, not estimated
-GPS_SIGMA_ASSUMED_M = 0.003  # typical continuous GNSS daily-solution precision
+ONSET_DAY = 60.0
+PRIMARY_GNSS_ID = "GNSS-01"
+VARIOGRAM_MAX_LAG_M = 800.0
+VARIOGRAM_N_BINS = 10
 
 SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 11)] + [f"DESC-{i:02d}" for i in range(1, 11)]
 
@@ -57,8 +56,8 @@ SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 11)] + [f"DESC-{i:02d}" for i
 def load_data():
     ifg = pd.read_csv(os.path.join(DATA_DIR, "interferograms.csv"))
     meta = pd.read_csv(os.path.join(DATA_DIR, "interferogram_metadata.csv"))
-    gps = pd.read_csv(os.path.join(DATA_DIR, "gps_station.csv"))
-    return ifg, meta, gps
+    gnss = pd.read_csv(os.path.join(DATA_DIR, "gps_stations.csv"))
+    return ifg, meta, gnss
 
 
 def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO):
@@ -137,11 +136,6 @@ def fit_spatial(points, meta_full, observed_concat, robust=False):
 
 
 def screen_and_fit(ifg, meta_full, n_passes=4):
-    """Iteratively fit x0,y0,depth,rate using all currently-included
-    interferograms, decide per-interferogram whether elevation correction
-    helps, exclude any whose residual RMS against the fitted model still
-    exceeds the threshold, and repeat until the excluded set stabilizes.
-    """
     points_all = {}
     raw_all = {}
     for ifg_id in SEQUENTIAL_IDS:
@@ -179,46 +173,157 @@ def screen_and_fit(ifg, meta_full, n_passes=4):
     return included, excluded, used_data, points_all, fit
 
 
-def build_joint_resid_fn(points, meta_full, insar_observed, gps, sigma_los):
-    """Build a residual function combining InSAR residuals AND the GPS
-    station's E/N/U record, each weighted by its own assumed noise sigma.
+def estimate_insar_covariance(points_all, meta_full, included, used_data, params):
+    """Empirical semivariogram of the screened residuals, restricted to
+    short lags (where genuine spatially-correlated noise dominates over
+    any leftover large-scale structure from the elevation/turbulent
+    correction terms), fit to an exponential model.
     """
-    gps_x = gps["x_m"].values[0]
-    gps_y = gps["y_m"].values[0]
-    d_days = np.array([effective_duration(d) for d in gps["day"].values.astype(float)])
-    gps_obs = np.concatenate([
-        gps["east_disp_m"].values, gps["north_disp_m"].values, gps["vertical_disp_m"].values,
+    x = points_all[included[0]]["x"]
+    y = points_all[included[0]]["y"]
+    resid_matrix = np.array([
+        used_data[k] - spatial_prediction(params, {k: points_all[k]}, {k: meta_full[k]})
+        for k in included
     ])
+
+    n = len(x)
+    dx = x[:, None] - x[None, :]
+    dy = y[:, None] - y[None, :]
+    dist = np.sqrt(dx**2 + dy**2)
+    iu = np.triu_indices(n, k=1)
+    d_pairs = dist[iu]
+
+    bins = np.linspace(0, VARIOGRAM_MAX_LAG_M, VARIOGRAM_N_BINS + 1)
+    bin_idx = np.digitize(d_pairs, bins) - 1
+    sums = np.zeros(VARIOGRAM_N_BINS)
+    counts = np.zeros(VARIOGRAM_N_BINS)
+    for k in range(resid_matrix.shape[0]):
+        r = resid_matrix[k]
+        sq_diff = (r[iu[0]] - r[iu[1]]) ** 2
+        for b in range(VARIOGRAM_N_BINS):
+            mask = bin_idx == b
+            if mask.any():
+                sums[b] += sq_diff[mask].sum()
+                counts[b] += mask.sum()
+
+    valid = counts > 0
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+    gamma_emp = 0.5 * sums[valid] / counts[valid]
+
+    def model(d, sill, rng_):
+        return sill * (1 - np.exp(-d / rng_))
+
+    try:
+        popt, _ = curve_fit(
+            model, bin_centers[valid], gamma_emp,
+            p0=[max(gamma_emp[-1], 1e-8), 300.0],
+            bounds=([1e-9, 10.0], [1e-2, 3000.0]),
+        )
+        sill, corr_length = float(popt[0]), float(popt[1])
+    except Exception:
+        sill, corr_length = float(np.var(resid_matrix)), 300.0
+
+    return sill, corr_length, x, y
+
+
+def build_spatial_cholesky(x, y, sill, corr_length):
+    dx = x[:, None] - x[None, :]
+    dy = y[:, None] - y[None, :]
+    dist = np.sqrt(dx**2 + dy**2)
+    cov = sill * np.exp(-dist / corr_length)
+    cov += 1e-9 * sill * np.eye(len(x))
+    return cholesky(cov, lower=True)
+
+
+def estimate_gnss_covariance(gnss, station_ids, params):
+    """Method-of-moments decomposition of GNSS residuals (against the
+    stage-1 source model) into per-station white variance and shared
+    per-epoch common-mode variance.
+    """
+    x0, y0, depth, rate = params
+    comps = ["east_disp_m", "north_disp_m", "vertical_disp_m"]
+    dev_pool, mean_pool = [], []
+    for day, grp in gnss.groupby("day"):
+        dV = rate * effective_duration(float(day))
+        resid_by_comp = {c: [] for c in comps}
+        for _, row in grp.iterrows():
+            ux, uy, uz = mogi_displacement(
+                np.array([row.x_m]), np.array([row.y_m]), depth, dV, x0, y0
+            )
+            pred = {"east_disp_m": ux[0], "north_disp_m": uy[0], "vertical_disp_m": uz[0]}
+            for c in comps:
+                resid_by_comp[c].append(row[c] - pred[c])
+        for c in comps:
+            r = np.array(resid_by_comp[c])
+            m = r.mean()
+            mean_pool.append(m)
+            dev_pool.extend((r - m).tolist())
+
+    dev_pool = np.array(dev_pool)
+    mean_pool = np.array(mean_pool)
+    n_st = len(station_ids)
+    var_dev = dev_pool.var()
+    var_mean = mean_pool.var()
+    sigma_w2 = var_dev * n_st / max(n_st - 1, 1)
+    sigma_c2 = max(var_mean - sigma_w2 / n_st, 1e-10)
+    return float(np.sqrt(sigma_c2)), float(np.sqrt(sigma_w2))
+
+
+def build_gnss_cholesky(n_stations, sigma_common, sigma_white):
+    cov = sigma_common**2 * np.ones((n_stations, n_stations)) + sigma_white**2 * np.eye(n_stations)
+    return cholesky(cov, lower=True)
+
+
+def build_joint_resid_fn(points, meta_full, insar_observed, insar_L, insar_ids,
+                          gnss, station_ids, gnss_L):
+    """Combined GLS residual function: whitens InSAR residuals (per
+    interferogram, using the estimated spatial covariance's Cholesky
+    factor) and GNSS residuals (per epoch/component, using the estimated
+    compound-symmetry covariance's Cholesky factor), then concatenates.
+    """
+    station_coords = {sid: gnss[gnss.station_id == sid].iloc[0][["x_m", "y_m"]].values for sid in station_ids}
+    epochs = sorted(gnss["day"].unique())
+    comps = ["east_disp_m", "north_disp_m", "vertical_disp_m"]
+    gnss_obs_by_epoch_comp = {}
+    for day in epochs:
+        grp = gnss[gnss.day == day].set_index("station_id")
+        for c in comps:
+            gnss_obs_by_epoch_comp[(day, c)] = grp.loc[station_ids, c].values.astype(float)
 
     def resid(params):
         x0, y0, depth, rate = params
-        insar_resid = (spatial_prediction(params, points, meta_full) - insar_observed) / sigma_los
-        dV = rate * d_days
-        ux, uy, uz = mogi_displacement(
-            np.full_like(dV, gps_x), np.full_like(dV, gps_y), depth, dV, x0, y0
-        )
-        gps_pred = np.concatenate([ux, uy, uz])
-        gps_resid = (gps_pred - gps_obs) / GPS_SIGMA_ASSUMED_M
-        return np.concatenate([insar_resid, gps_resid])
+
+        insar_whitened = []
+        for ifg_id in insar_ids:
+            pred = spatial_prediction(params, {ifg_id: points[ifg_id]}, {ifg_id: meta_full[ifg_id]})
+            raw_r = pred - insar_observed[ifg_id]
+            insar_whitened.append(solve_triangular(insar_L, raw_r, lower=True))
+        insar_whitened = np.concatenate(insar_whitened)
+
+        gnss_whitened = []
+        for day in epochs:
+            dV = rate * effective_duration(float(day))
+            for c in comps:
+                preds = []
+                for sid in station_ids:
+                    sx, sy = station_coords[sid]
+                    ux, uy, uz = mogi_displacement(np.array([sx]), np.array([sy]), depth, dV, x0, y0)
+                    preds.append({"east_disp_m": ux[0], "north_disp_m": uy[0], "vertical_disp_m": uz[0]}[c])
+                raw_r = np.array(preds) - gnss_obs_by_epoch_comp[(day, c)]
+                gnss_whitened.append(solve_triangular(gnss_L, raw_r, lower=True))
+        gnss_whitened = np.concatenate(gnss_whitened)
+
+        return np.concatenate([insar_whitened, gnss_whitened])
 
     return resid
 
 
-def joint_refit_with_gps(p0, resid_fn):
-    """Refit (x0,y0,depth,rate) starting from the InSAR-only solution."""
+def joint_refit(p0, resid_fn):
     bounds = ([-3000, -3000, 500, 1e2], [3000, 3000, 15000, 2e7])
-    res = least_squares(resid_fn, p0, bounds=bounds, max_nfev=8000)
-    return res
+    return least_squares(resid_fn, p0, bounds=bounds, max_nfev=8000)
 
 
 def delta_method_ci(resid_fn, best_params, n_params=4):
-    """Linearized (delta-method) 95% CI: compute the Jacobian of the
-    (weighted) joint residuals with respect to (x0,y0,depth,rate) at the
-    best fit via finite differences, then use the standard OLS asymptotic
-    covariance (J^T J)^-1 (residuals are already sigma-weighted, so the
-    reduced chi-square below is dimensionless and should be near 1 for a
-    correctly-specified noise model).
-    """
     r0 = resid_fn(best_params)
     n_data = len(r0)
     eps = 1e-6
@@ -233,25 +338,33 @@ def delta_method_ci(resid_fn, best_params, n_params=4):
     JTJ = J.T @ J
     cov = reduced_chi2 * np.linalg.inv(JTJ + 1e-12 * np.eye(n_params))
     se = np.sqrt(np.diag(cov))
-
     lo = best_params - 1.96 * se
     hi = best_params + 1.96 * se
     return lo, hi
 
 
 def main():
-    ifg, meta, gps = load_data()
+    ifg, meta, gnss = load_data()
     meta_full = {row["interferogram_id"]: row for _, row in meta.iterrows()}
+    station_ids = sorted(gnss["station_id"].unique())
 
     included, excluded, used_data, points_all, insar_fit = screen_and_fit(ifg, meta_full)
     points = {k: points_all[k] for k in included}
-    insar_observed = np.concatenate([used_data[k] for k in included])
+    insar_observed = {k: used_data[k] for k in included}
 
-    r0 = spatial_prediction(insar_fit.x, points, meta_full) - insar_observed
-    sigma_los = float(np.sqrt(np.mean(r0 ** 2)))
+    sill, corr_length, x_used, y_used = estimate_insar_covariance(
+        points_all, meta_full, included, used_data, insar_fit.x
+    )
+    insar_L = build_spatial_cholesky(x_used, y_used, sill, corr_length)
 
-    resid_fn = build_joint_resid_fn(points, meta_full, insar_observed, gps, sigma_los)
-    joint_fit = joint_refit_with_gps(insar_fit.x, resid_fn)
+    sigma_common, sigma_white = estimate_gnss_covariance(gnss, station_ids, insar_fit.x)
+    gnss_L = build_gnss_cholesky(len(station_ids), sigma_common, sigma_white)
+
+    resid_fn = build_joint_resid_fn(
+        points, meta_full, insar_observed, insar_L, included,
+        gnss, station_ids, gnss_L,
+    )
+    joint_fit = joint_refit(insar_fit.x, resid_fn)
     x0, y0, depth, rate = joint_fit.x
 
     lo, hi = delta_method_ci(resid_fn, joint_fit.x)
@@ -265,10 +378,9 @@ def main():
     sample_y = np.zeros_like(sample_x)
     ux, uy, uz = mogi_displacement(sample_x, sample_y, depth, cumulative_dV, x0, y0)
 
-    gps_x = float(gps["x_m"].values[0])
-    gps_y = float(gps["y_m"].values[0])
+    primary_row = gnss[gnss.station_id == PRIMARY_GNSS_ID].iloc[0]
     gpx, gpy, gpz = mogi_displacement(
-        np.array([gps_x]), np.array([gps_y]), depth, cumulative_dV, x0, y0
+        np.array([primary_row.x_m]), np.array([primary_row.y_m]), depth, cumulative_dV, x0, y0
     )
 
     result = {
@@ -282,6 +394,12 @@ def main():
         "poisson_ratio_assumed": POISSON_RATIO,
         "gps_predicted_displacement_final_m": {
             "east_m": float(gpx[0]), "north_m": float(gpy[0]), "vertical_m": float(gpz[0]),
+        },
+        "insar_covariance_estimate": {
+            "correlation_length_m": corr_length, "sill_m2": sill,
+        },
+        "gnss_covariance_estimate": {
+            "common_mode_sigma_m": sigma_common, "white_sigma_m": sigma_white,
         },
         "vertical_east_west_decomposition_sample": [
             {"x_m": float(sample_x[i]), "vertical_m": float(uz[i]), "east_west_m": float(ux[i])}

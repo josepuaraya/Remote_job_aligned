@@ -1,25 +1,38 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v4).
+insar-volcano-inversion task (v5).
 
 AUTHOR'S PROVENANCE SCRIPT. Not executed by solve.py/test_outputs.py at
 runtime; included for reviewer traceability.
 
 True source: a Mogi (1958) point source at x0=0, y0=0, depth=4500 m, with
-onset at day 60 and a LINEAR (constant-rate) post-onset inflation profile
-(see v3 notes below for why onset/tau are disclosed rather than free
-parameters).
+onset at day 60 and a LINEAR (constant-rate) post-onset inflation profile.
 
-v4 change (see process.md): added a single continuous GPS station. The
-InSAR-only spatial sampling (domain half-width 3500 m, comparable to the
-4500 m source depth) under-samples the far-field part of the Mogi radial
-decay curve, so depth and cumulative volume change are only weakly
-separable from InSAR alone (the classic Mogi depth/volume trade-off). The
-GPS station gives a genuinely independent, non-atmospheric, 3-component
-(E/N/U) measurement at a fixed point that a correct joint inversion must
-reconcile with the InSAR-derived source; an InSAR-only fit that lands on
-the depth/volume trade-off ridge (still a "good fit" against InSAR
-residuals) will disagree with this independent record.
+v5 change (see process.md): the InSAR atmospheric noise and the GNSS
+common-mode error are now genuinely spatially/cross-station correlated
+(drawn from an actual covariance model), not just independent per-point
+draws. A correct inversion should estimate that covariance structure from
+the data itself and use it to weight the joint fit (generalized least
+squares / Bayesian inversion), rather than treating every point as an
+independent, equally-weighted observation. This targets the same failure
+mode documented in v3/v4: an unweighted (or iid-weighted) fit can still
+show small residuals while its reported uncertainty is invalid, because
+correlated noise carries less independent information than its raw point
+count suggests.
+
+- InSAR: each interferogram's baseline noise term is now drawn from a
+  spatially correlated Gaussian random field (exponential covariance
+  kernel, fixed correlation length, same marginal variance as the old
+  i.i.d. term) over the shared 700-point cloud, instead of i.i.d. noise.
+  The elevation-correlated (repairable) and large-scale (unrepairable)
+  components are unchanged, so the existing atmospheric-noise QC
+  classification and its calibration are unaffected -- only the baseline
+  noise "shape" changed, not its per-point magnitude.
+- GNSS: 3 continuous stations at different offsets, each carrying its own
+  independent white noise (as in v4) PLUS a per-epoch, per-component
+  common-mode error shared identically across all stations that epoch
+  (a standard real GNSS network effect -- e.g. reference-frame or orbit
+  error -- normally removed by common-mode stacking across the network).
 
 20 interferograms: 10 ascending, 10 descending, each track formed from
 11 independently-scheduled acquisition dates (~monthly spacing, offset
@@ -31,22 +44,19 @@ Descending geometry: incidence=39.1840 deg, heading=-168.27934 deg.
 (Real geometry values from the author's own prior fieldwork in Iceland.)
 
 Noise model, 6/8/6 split across the 20 interferograms:
-- 6 "clean": small i.i.d. noise only.
-- 8 "repairable": clean noise PLUS an elevation-correlated linear term
-  (simulating tropospheric delay correlated with topography), correctable
-  via a phase-vs-elevation regression.
-- 6 "unrepairable": clean noise PLUS a large-amplitude smooth 2D random
-  field NOT correlated with elevation (simulating turbulent atmospheric
-  noise with no simple correctable structure) -- must be excluded.
+- 6 "clean": spatially correlated baseline noise only.
+- 8 "repairable": spatially correlated baseline noise PLUS an
+  elevation-correlated linear term (simulating tropospheric delay
+  correlated with topography), correctable via a phase-vs-elevation
+  regression.
+- 6 "unrepairable": spatially correlated baseline noise PLUS a
+  large-amplitude smooth 2D field NOT correlated with elevation
+  (simulating turbulent atmospheric noise with no simple correctable
+  structure) -- must be excluded.
 
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
 downsampling (e.g. quadtree) an InSAR product before inversion.
-
-The GPS station is NOT affected by atmospheric noise (it is a point
-sensor, not an interferometric measurement) -- its only error source is
-small i.i.d. measurement noise, typical of a continuous GNSS daily
-solution.
 """
 
 import numpy as np
@@ -65,10 +75,6 @@ TRUE_Y0_M = 0.0
 TRUE_DEPTH_M = 4500.0
 POISSON_RATIO = 0.25
 
-# Onset day is KNOWN/disclosed (not estimated by the agent) -- avoids the
-# severe joint spatial+temporal degeneracy found earlier when onset was
-# an unknown fit alongside x0,y0,depth. Deformation grows LINEARLY
-# (constant rate) after onset, no saturation.
 ONSET_DAY = 60
 N_DAYS = 365
 DISPLACEMENT_RATE_M_PER_DAY_AT_SOURCE = 0.9 / (N_DAYS - 1 - ONSET_DAY)  # ~0.00296 m/day
@@ -93,11 +99,6 @@ DOMAIN_HALF_WIDTH_M = 3500.0
 x_pts = RNG.uniform(-DOMAIN_HALF_WIDTH_M, DOMAIN_HALF_WIDTH_M, N_POINTS)
 y_pts = RNG.uniform(-DOMAIN_HALF_WIDTH_M, DOMAIN_HALF_WIDTH_M, N_POINTS)
 
-# Synthetic volcanic-cone elevation model -- peak is OFFSET from the true
-# Mogi source location (real volcanoes commonly have their topographic
-# edifice displaced from the deep magmatic pressure source), so an
-# elevation-correlated noise regression cannot be confused with the real
-# deformation signal, which is centered at the source instead
 ELEV_PEAK_X_M = 300.0
 ELEV_PEAK_Y_M = 200.0
 PEAK_ELEV_M = 1500.0
@@ -107,13 +108,30 @@ r_from_elev_peak = np.sqrt((x_pts - ELEV_PEAK_X_M)**2 + (y_pts - ELEV_PEAK_Y_M)*
 elevation_pts = PEAK_ELEV_M * np.exp(-r_from_elev_peak / DECAY_LENGTH_M) + BASE_ELEV_M
 
 # ---------------------------------------------------------------------------
-# GPS station: fixed location, off-axis from the source so all three
-# components (E, N, U) carry real signal
+# Spatially correlated InSAR baseline noise: exponential covariance kernel,
+# same marginal sigma as the old i.i.d. term (0.002m) -- QC threshold
+# calibration is unaffected since per-point magnitude is unchanged, only
+# the correlation between points.
 # ---------------------------------------------------------------------------
-GPS_X_M = 900.0
-GPS_Y_M = -700.0
-GPS_NOISE_SIGMA_M = 0.003  # ~3mm, typical continuous GNSS daily-solution precision
-GPS_EPOCH_DAYS = np.arange(0, N_DAYS, 10)  # continuous station, decimated to 10-day epochs
+INSAR_CORR_SIGMA_M = 0.002
+INSAR_CORR_LENGTH_M = 400.0
+
+
+def _build_spatial_cholesky(x, y, sigma, length_scale):
+    dx = x[:, None] - x[None, :]
+    dy = y[:, None] - y[None, :]
+    dist = np.sqrt(dx**2 + dy**2)
+    cov = sigma**2 * np.exp(-dist / length_scale)
+    cov += 1e-9 * (sigma**2) * np.eye(len(x))  # jitter for numerical stability
+    return np.linalg.cholesky(cov)
+
+
+_SPATIAL_CHOL = _build_spatial_cholesky(x_pts, y_pts, INSAR_CORR_SIGMA_M, INSAR_CORR_LENGTH_M)
+
+
+def draw_correlated_insar_field():
+    z = RNG.standard_normal(N_POINTS)
+    return _SPATIAL_CHOL @ z
 
 
 def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO):
@@ -130,18 +148,10 @@ def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO)
 
 
 def cumulative_dV_at_day(day, onset=ONSET_DAY, rate=TRUE_DV_RATE_M3_PER_DAY):
-    """Linear (constant-rate) cumulative volume change since record start.
-    Zero before onset, then grows linearly -- onset is KNOWN/disclosed,
-    so this is not a shape parameter the agent must estimate."""
     return 0.0 if day < onset else rate * (day - onset)
 
 
 def los_projection_full(u_e, u_n, u_u, incidence_deg, heading_deg):
-    """Full LOS projection (Image 1) -- what a real satellite actually
-    measures, including the true (if partial) sensitivity to north-south
-    motion. Used for the true synthetic data and the primary direct-LOS
-    inversion.
-    """
     theta = np.radians(incidence_deg)
     alpha = np.radians(heading_deg)
     return (np.sin(theta) * np.cos(alpha) * u_e
@@ -150,11 +160,6 @@ def los_projection_full(u_e, u_n, u_u, incidence_deg, heading_deg):
 
 
 def los_projection_reduced(u_e, u_u, incidence_deg, heading_deg):
-    """Reduced LOS projection (Image 2), assuming negligible north-south
-    motion. Used ONLY for the secondary, descriptive vertical/east-west
-    decomposition deliverable, where the 2-look-direction system must
-    assume V_N=0 to be solvable for 2 unknowns.
-    """
     theta = np.radians(incidence_deg)
     alpha = np.radians(heading_deg)
     return -np.cos(theta) * u_u + np.sin(theta) * np.cos(alpha) * u_e
@@ -163,11 +168,6 @@ def los_projection_reduced(u_e, u_u, incidence_deg, heading_deg):
 # ---------------------------------------------------------------------------
 # Build acquisition date lists (independent per track)
 # ---------------------------------------------------------------------------
-# Acquisition dates WITH a real temporal gap (no acquisitions at all
-# during a stretch of the record) for each track -- the interferogram
-# spanning that gap will have a much longer duration than its neighbors,
-# and the true cumulative displacement during the un-observed stretch
-# must be inferred, not directly measured.
 asc_dates = np.concatenate([
     np.linspace(0, 140, 6), np.linspace(210, N_DAYS - 1, 5)
 ]).astype(int)  # 70-day gap (140-210), 11 dates -> 10 interferograms
@@ -178,33 +178,14 @@ desc_dates = np.concatenate([
 asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(10)]
 desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
 
-# ---------------------------------------------------------------------------
-# Assign noise category: 6 clean, 8 repairable, 6 unrepairable (mixed
-# across ascending/descending)
-# ---------------------------------------------------------------------------
 categories = ["clean"] * 6 + ["repairable"] * 8 + ["unrepairable"] * 6
 RNG.shuffle(categories)
 asc_categories = categories[:10]
 desc_categories = categories[10:]
 
-CLEAN_NOISE_SIGMA_M = 0.002        # ~2mm i.i.d.
-ELEV_CORR_COEFF_RANGE = (0.000006, 0.000012)  # m displacement per m elevation
-                                                # (rescaled down ~7x from the
-                                                # earlier full-span design,
-                                                # since individual sequential
-                                                # interferograms now carry a
-                                                # much smaller true signal
-                                                # (~2-8cm over ~28-90 days)
-                                                # rather than ~0.9m over the
-                                                # full record)
-REPAIRABLE_TURBULENT_SIGMA_M = 0.004  # residual turbulent overlay,
-                                        # riding on top of the elevation-linear
-                                        # term -- correcting for elevation alone
-                                        # does NOT perfectly recover the signal;
-                                        # a real judgment call on the residual
-                                        # noise level (still below threshold) is
-                                        # required, not a blind mechanical fit
-UNREPAIRABLE_NOISE_SIGMA_M = 0.012  # rescaled down to match smaller signal scale
+ELEV_CORR_COEFF_RANGE = (0.000006, 0.000012)
+REPAIRABLE_TURBULENT_SIGMA_M = 0.004
+UNREPAIRABLE_NOISE_SIGMA_M = 0.012
 
 
 def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
@@ -216,23 +197,16 @@ def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
 
     los_true = los_projection_full(d_ux, d_uy, d_uz, incidence_deg, heading_deg)
 
-    noise = CLEAN_NOISE_SIGMA_M * RNG.standard_normal(N_POINTS)
+    noise = draw_correlated_insar_field()
     if category == "repairable":
         coeff = RNG.uniform(*ELEV_CORR_COEFF_RANGE) * RNG.choice([-1, 1])
         elevation_term = coeff * (elevation_pts - BASE_ELEV_M)
-        # smooth turbulent overlay riding on top of the elevation-driven
-        # term -- normalized to a FIXED realized RMS (not left to random
-        # coefficient-draw variance) so repairable interferograms have a
-        # consistent, reliably-separable post-correction noise level
         raw_field = x_pts + 0.7 * y_pts + 0.3 * (x_pts * y_pts / DOMAIN_HALF_WIDTH_M)
         raw_field = raw_field - np.mean(raw_field)
         raw_field = raw_field / np.std(raw_field) * REPAIRABLE_TURBULENT_SIGMA_M
         turbulent_overlay = raw_field * RNG.choice([-1, 1])
         noise = noise + elevation_term + turbulent_overlay
     elif category == "unrepairable":
-        # large-amplitude smooth field uncorrelated with elevation,
-        # normalized to a FIXED realized RMS well above the correction
-        # threshold regardless of any reasonable correction attempt
         raw_field = x_pts - 0.5 * y_pts + 0.4 * (x_pts * y_pts / DOMAIN_HALF_WIDTH_M)
         raw_field = raw_field - np.mean(raw_field)
         raw_field = raw_field / np.std(raw_field) * UNREPAIRABLE_NOISE_SIGMA_M
@@ -281,26 +255,40 @@ for i, (day0, day1) in enumerate(desc_pairs):
     })
 
 # ---------------------------------------------------------------------------
-# GPS station record (continuous, decimated to 10-day epochs; cumulative
-# displacement relative to day 0; iid measurement noise only -- no
-# atmosphere, since it is a point sensor, not an interferogram)
+# GNSS network: 3 continuous stations, fixed locations, decimated to
+# 10-day epochs. Each epoch/component gets ONE shared common-mode draw
+# (identical across stations that epoch) plus independent per-station
+# white noise.
 # ---------------------------------------------------------------------------
-gps_records = []
-for day in GPS_EPOCH_DAYS:
-    dV = cumulative_dV_at_day(int(day))
-    ux, uy, uz = mogi_displacement(
-        np.array([GPS_X_M]), np.array([GPS_Y_M]), TRUE_DEPTH_M, dV, TRUE_X0_M, TRUE_Y0_M
-    )
-    noise = GPS_NOISE_SIGMA_M * RNG.standard_normal(3)
-    gps_records.append({
-        "day": int(day), "x_m": GPS_X_M, "y_m": GPS_Y_M,
-        "east_disp_m": round(float(ux[0]) + noise[0], 6),
-        "north_disp_m": round(float(uy[0]) + noise[1], 6),
-        "vertical_disp_m": round(float(uz[0]) + noise[2], 6),
-    })
+GNSS_STATIONS = [
+    {"id": "GNSS-01", "x_m": 900.0, "y_m": -700.0},
+    {"id": "GNSS-02", "x_m": -1300.0, "y_m": 900.0},
+    {"id": "GNSS-03", "x_m": 200.0, "y_m": 1600.0},
+]
+GNSS_WHITE_SIGMA_M = 0.003
+GNSS_COMMON_MODE_SIGMA_M = 0.0025
+GNSS_EPOCH_DAYS = np.arange(0, N_DAYS, 10)
 
+gnss_records = []
+for day in GNSS_EPOCH_DAYS:
+    dV = cumulative_dV_at_day(int(day))
+    common = GNSS_COMMON_MODE_SIGMA_M * RNG.standard_normal(3)  # shared per epoch: e, n, u
+    for st in GNSS_STATIONS:
+        ux, uy, uz = mogi_displacement(
+            np.array([st["x_m"]]), np.array([st["y_m"]]), TRUE_DEPTH_M, dV, TRUE_X0_M, TRUE_Y0_M
+        )
+        wn = GNSS_WHITE_SIGMA_M * RNG.standard_normal(3)
+        gnss_records.append({
+            "station_id": st["id"], "day": int(day), "x_m": st["x_m"], "y_m": st["y_m"],
+            "east_disp_m": round(float(ux[0]) + common[0] + wn[0], 6),
+            "north_disp_m": round(float(uy[0]) + common[1] + wn[1], 6),
+            "vertical_disp_m": round(float(uz[0]) + common[2] + wn[2], 6),
+        })
+
+PRIMARY_GNSS_ID = "GNSS-01"
+primary = next(st for st in GNSS_STATIONS if st["id"] == PRIMARY_GNSS_ID)
 true_final_ux, true_final_uy, true_final_uz = mogi_displacement(
-    np.array([GPS_X_M]), np.array([GPS_Y_M]), TRUE_DEPTH_M,
+    np.array([primary["x_m"]]), np.array([primary["y_m"]]), TRUE_DEPTH_M,
     cumulative_dV_at_day(N_DAYS - 1), TRUE_X0_M, TRUE_Y0_M,
 )
 
@@ -322,11 +310,11 @@ with open(os.path.join(OUTPUT_DIR, "interferogram_metadata.csv"), "w", newline="
     for rec in answer_pairs:
         w.writerow({k: rec[k] for k in fieldnames})
 
-with open(os.path.join(OUTPUT_DIR, "gps_station.csv"), "w", newline="") as f:
-    fieldnames = ["day", "x_m", "y_m", "east_disp_m", "north_disp_m", "vertical_disp_m"]
+with open(os.path.join(OUTPUT_DIR, "gps_stations.csv"), "w", newline="") as f:
+    fieldnames = ["station_id", "day", "x_m", "y_m", "east_disp_m", "north_disp_m", "vertical_disp_m"]
     w = csv.DictWriter(f, fieldnames=fieldnames)
     w.writeheader()
-    w.writerows(gps_records)
+    w.writerows(gnss_records)
 
 answer_key = {
     "true_x0_m": TRUE_X0_M,
@@ -338,28 +326,27 @@ answer_key = {
     "unrepairable_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "unrepairable"],
     "repairable_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "repairable"],
     "clean_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "clean"],
-    "gps_location_m": {"x_m": GPS_X_M, "y_m": GPS_Y_M},
+    "gps_location_m": {"x_m": primary["x_m"], "y_m": primary["y_m"]},
     "true_gps_final_displacement_m": {
         "east_m": float(true_final_ux[0]),
         "north_m": float(true_final_uy[0]),
         "vertical_m": float(true_final_uz[0]),
     },
+    "insar_true_correlation_length_m": INSAR_CORR_LENGTH_M,
+    "insar_true_sill_m2": INSAR_CORR_SIGMA_M ** 2,
+    "gnss_true_common_mode_sigma_m": GNSS_COMMON_MODE_SIGMA_M,
+    "gnss_true_white_sigma_m": GNSS_WHITE_SIGMA_M,
+    "gnss_stations_m": GNSS_STATIONS,
     "notes": (
-        "Generated by generate_insar_data.py. True Mogi source at x0=0, "
-        "y0=0, depth=4500m. Onset day (60) is KNOWN/disclosed to the "
-        "agent -- deformation grows LINEARLY (constant rate) after onset, "
-        "no saturation. Acquisition dates have a genuine ~70-day gap "
-        "(different for each track) with no coverage at all, requiring "
-        "interpolation across it. 700 quasi-random sample points "
-        "(downsampled InSAR product). 6 clean / 8 repairable "
-        "(elevation-correlated) / 6 unrepairable (turbulent) interferograms "
-        "among the 20 sequential ones. A single continuous GPS station "
-        "(3-component E/N/U, iid noise only, no atmosphere) provides an "
-        "independent check on the InSAR-derived source: the domain "
-        "half-width (3500m) is comparable to the source depth (4500m), so "
-        "InSAR-only sampling under-resolves the depth/volume trade-off; a "
-        "fit that ignores the GPS record can still show small InSAR "
-        "residuals while landing on the wrong point of that trade-off."
+        "Generated by generate_insar_data.py (v5). True Mogi source at "
+        "x0=0, y0=0, depth=4500m. Onset day (60) known/disclosed; linear "
+        "post-onset rate. InSAR baseline noise is spatially correlated "
+        "(exponential kernel, correlation length 400m, same marginal "
+        "sigma as the old i.i.d. term) -- QC classification and its "
+        "calibration are unaffected. 3-station GNSS network with a "
+        "shared per-epoch common-mode error plus independent per-station "
+        "white noise. A correct inversion estimates both covariance "
+        "structures from the data and weights the joint fit accordingly."
     ),
 }
 with open(os.path.join(OUTPUT_DIR, "answer_key.json"), "w") as f:
