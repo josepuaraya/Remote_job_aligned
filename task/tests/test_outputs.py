@@ -71,6 +71,25 @@ MASS_CI_WIDTH_FRACTION = 0.6
 MASS_REL_TOL = 0.35
 VELOCITY_REL_TOL = 0.20
 
+# Minimum CI width (as a fraction of the true value) for mass and density.
+# Calibrated from an ablation of the reference solution with the spatial
+# correlation length forced to ~0 (i.e. treating GNSS and gravity noise as
+# independent, uncorrelated per-station values): across 3 independent noise
+# seeds that naive analysis produces mass/density CIs of ~22-24% of the true
+# value, versus ~37-39% for the correlation-aware analysis -- a large,
+# consistent gap, because skipping the spatial + cross-dataset covariance
+# makes the reported uncertainty overconfident (too narrow), not just
+# differently centered. This floor sits between the two (comfortably above
+# the naive ceiling, comfortably below the correlated floor observed across
+# seeds), so it fails an analysis that skipped the covariance modeling on
+# the actual output, rather than on a self-reported claim. x0/y0/depth/
+# volume show the same direction of effect but a much smaller, noisier gap
+# (~1.06-1.3x versus ~1.6-1.7x for mass/density) that isn't safely
+# separable from seed-to-seed variation with only 3 calibration seeds, so
+# no floor is imposed there -- only the existing maximum-width caps apply.
+MASS_CI_MIN_WIDTH_FRACTION = 0.28
+DENSITY_CI_MIN_WIDTH_FRACTION = 0.28
+
 # Containment slack: fraction of the reported CI's own width that the true
 # value is allowed to fall outside of and still count as "contained". This
 # absorbs the ~5% chance that an honestly-calibrated 95% CI legitimately
@@ -97,13 +116,20 @@ def submitted():
         pytest.fail(f"result.txt is not valid JSON: {e}")
 
 
-def assert_ci_reasonable(true_value, lo, hi, max_width, label):
+def assert_ci_reasonable(true_value, lo, hi, max_width, label, min_width=None):
     assert hi >= lo, f"{label}: reported CI is inverted [{lo}, {hi}]"
     width = hi - lo
     assert width <= max_width, (
         f"{label} CI too wide: {width:.4g} (cap {max_width:.4g}). A wide interval is not a "
         f"substitute for a real estimate of uncertainty."
     )
+    if min_width is not None:
+        assert width >= min_width, (
+            f"{label} CI too narrow: {width:.4g} (floor {min_width:.4g}). An interval this "
+            f"tight is only reachable by treating GNSS and gravity noise as independent and "
+            f"ignoring their spatial and cross-dataset correlation, which understates the "
+            f"true uncertainty rather than reflecting a more precise estimate."
+        )
     slack = CI_CONTAINMENT_SLACK_FRACTION * width
     assert (lo - slack) <= true_value <= (hi + slack), (
         f"{label}: true value {true_value:.4g} falls outside the reported 95% CI "
@@ -265,7 +291,8 @@ def test_mass_within_tolerance_and_calibrated(submitted, answer_key):
 
     lo, hi = submitted["mass_change_uncertainty_95"]
     max_width = MASS_CI_WIDTH_FRACTION * true_mass
-    assert_ci_reasonable(true_mass, lo, hi, max_width, "mass")
+    min_width = MASS_CI_MIN_WIDTH_FRACTION * true_mass
+    assert_ci_reasonable(true_mass, lo, hi, max_width, "mass", min_width=min_width)
 
 
 def test_density_confidence_interval_is_calibrated(submitted, answer_key):
@@ -279,7 +306,8 @@ def test_density_confidence_interval_is_calibrated(submitted, answer_key):
     true_density = answer_key["true_density_kgm3"]
     lo, hi = submitted["density_uncertainty_95"]
     max_width = DENSITY_CI_WIDTH_FRACTION * true_density
-    assert_ci_reasonable(true_density, lo, hi, max_width, "density")
+    min_width = DENSITY_CI_MIN_WIDTH_FRACTION * true_density
+    assert_ci_reasonable(true_density, lo, hi, max_width, "density", min_width=min_width)
 
 
 def test_station_velocities_present_for_all_stations(submitted):
