@@ -213,6 +213,16 @@ with open(os.path.join(OUTPUT_DIR, "gnss_timeseries.csv"), "w", newline="") as f
     w.writeheader()
     w.writerows(timeseries_records)
 
+# NOTE: gnss_displacement_total.csv is written for provenance/debugging only
+# and must NOT be copied into task/environment/data/ (agent-visible public
+# data). solve.py derives total displacement, and its per-station
+# uncertainty, itself from gnss_timeseries.csv (the plateau-to-plateau
+# window comparison in compute_total_displacement); it never reads this
+# file. Shipping it to the agent would hand over a ready-made total
+# displacement + formal sigma_m, short-circuiting exactly the derivation
+# step (robust to end-of-record saturation, uncertainty from repeated
+# noisy measurements rather than a given formal value) that is part of
+# the task's intended difficulty.
 with open(os.path.join(OUTPUT_DIR, "gnss_displacement_total.csv"), "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=list(gnss_records[0].keys()))
     w.writeheader()
