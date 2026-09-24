@@ -164,6 +164,31 @@ x0/y0/depth/volume show the same direction of effect but only a
 variation observed above to gate on reliably with only 3 calibration
 seeds, so no minimum-width floor is applied to those four.
 
+**The floor does not penalize a correct non-bootstrap method.** To
+check that the 28% floor reflects the covariance model rather than the
+specific resampling technique, a second, independent uncertainty
+estimate was computed via the delta method / asymptotic GLS: the
+parameter covariance Cov(theta) ~= (J^T Sigma^-1 J)^-1, from the
+numerical Jacobian J of the stacked forward model at the fitted
+solution and the SAME joint covariance matrix Sigma used in the fit
+(so it reflects the same spatial + cross-dataset correlation, just
+propagated by linearization instead of resampling), with density's
+variance from the standard delta-method propagation of dM/dV.
+
+| seed | mass CI width (bootstrap) | mass CI width (delta-method) | density CI width (bootstrap) | density CI width (delta-method) |
+|---|---|---|---|---|
+| 11 | 38.61% | 31.80% | 37.74% | 30.85% |
+| 42 | 38.04% | 32.38% | 37.46% | 30.68% |
+| 7  | 37.71% | 31.73% | 37.22% | 30.72% |
+
+The delta-method intervals are narrower than the bootstrap's (as
+expected -- linearization vs. resampling around a nonlinear forward
+model), but land at ~31-32% (mass) and ~31% (density) across all three
+seeds: comfortably above the 28% floor, and clearly separated from the
+~22-23% the no-correlation ablation produces. This is the evidence
+that the floor grades a correlation-aware analysis as a class, not one
+specific implementation of it.
+
 **Flagged benchmark:** all three seeds correctly and uniquely flag
 MG-05 (the true hydrological-anomaly benchmark), with no other
 benchmark flagged.

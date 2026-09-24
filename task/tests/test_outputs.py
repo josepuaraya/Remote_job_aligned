@@ -70,6 +70,14 @@ MASS_CI_WIDTH_FRACTION = 0.6
 MASS_REL_TOL = 0.35
 VELOCITY_REL_TOL = 0.20
 
+# Per-station velocity standard-error sanity bound: observed ~7.8e-6 to
+# 8.9e-6 m/day across all 10 stations and 3 calibration seeds (regression
+# standard error over ~490 daily observations); this cap sits ~5.6x above
+# the observed maximum, generous enough for a different reasonable
+# windowing/regression choice, while still catching a placeholder,
+# degenerate, or unpropagated value.
+VELOCITY_UNCERTAINTY_MAX_M_PER_DAY = 5e-5
+
 # Minimum CI width (as a fraction of the true value) for mass and density.
 # Calibrated from an ablation of the reference solution with the spatial
 # correlation length forced to ~0 (i.e. treating GNSS and gravity noise as
@@ -305,6 +313,17 @@ def test_station_velocities_present_for_all_stations(submitted):
     )
     for entry in velocities:
         assert "station_id" in entry and "velocity_m_per_day" in entry and "uncertainty_95" in entry
+        u = entry["uncertainty_95"]
+        assert isinstance(u, (int, float)) and not isinstance(u, bool) and u > 0, (
+            f"Station {entry.get('station_id')}: uncertainty_95={u!r} must be a positive number, "
+            f"not a placeholder or zero"
+        )
+        assert u <= VELOCITY_UNCERTAINTY_MAX_M_PER_DAY, (
+            f"Station {entry.get('station_id')}: uncertainty_95={u:.3g} m/day exceeds "
+            f"{VELOCITY_UNCERTAINTY_MAX_M_PER_DAY:.3g} m/day -- an interval this wide for a "
+            f"velocity fit over ~490 daily observations suggests the uncertainty wasn't "
+            f"actually derived from the regression"
+        )
 
 
 def test_station_velocities_match_truth(submitted, answer_key):
