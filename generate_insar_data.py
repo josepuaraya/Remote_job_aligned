@@ -1,14 +1,25 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task.
+insar-volcano-inversion task (v4).
 
 AUTHOR'S PROVENANCE SCRIPT. Not executed by solve.py/test_outputs.py at
 runtime; included for reviewer traceability.
 
 True source: a Mogi (1958) point source at x0=0, y0=0, depth=4500 m, with
-a decaying-rate (exponential, saturating) inflation profile: onset at
-day 60, initial rate 350 cm/yr, time constant tau=100 days, implying a
-final cumulative displacement (at the point nearest the source) of ~96 cm.
+onset at day 60 and a LINEAR (constant-rate) post-onset inflation profile
+(see v3 notes below for why onset/tau are disclosed rather than free
+parameters).
+
+v4 change (see process.md): added a single continuous GPS station. The
+InSAR-only spatial sampling (domain half-width 3500 m, comparable to the
+4500 m source depth) under-samples the far-field part of the Mogi radial
+decay curve, so depth and cumulative volume change are only weakly
+separable from InSAR alone (the classic Mogi depth/volume trade-off). The
+GPS station gives a genuinely independent, non-atmospheric, 3-component
+(E/N/U) measurement at a fixed point that a correct joint inversion must
+reconcile with the InSAR-derived source; an InSAR-only fit that lands on
+the depth/volume trade-off ridge (still a "good fit" against InSAR
+residuals) will disagree with this independent record.
 
 20 interferograms: 10 ascending, 10 descending, each track formed from
 11 independently-scheduled acquisition dates (~monthly spacing, offset
@@ -31,6 +42,11 @@ Noise model, 6/8/6 split across the 20 interferograms:
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
 downsampling (e.g. quadtree) an InSAR product before inversion.
+
+The GPS station is NOT affected by atmospheric noise (it is a point
+sensor, not an interferometric measurement) -- its only error source is
+small i.i.d. measurement noise, typical of a continuous GNSS daily
+solution.
 """
 
 import numpy as np
@@ -38,7 +54,8 @@ import csv
 import json
 import os
 
-RNG = np.random.default_rng(7)
+GENERATOR_SEED = int(os.environ.get("GENERATOR_SEED", "7"))
+RNG = np.random.default_rng(GENERATOR_SEED)
 
 # ---------------------------------------------------------------------------
 # TRUE (ground truth) source parameters
@@ -88,6 +105,15 @@ DECAY_LENGTH_M = 1500.0
 BASE_ELEV_M = 200.0
 r_from_elev_peak = np.sqrt((x_pts - ELEV_PEAK_X_M)**2 + (y_pts - ELEV_PEAK_Y_M)**2)
 elevation_pts = PEAK_ELEV_M * np.exp(-r_from_elev_peak / DECAY_LENGTH_M) + BASE_ELEV_M
+
+# ---------------------------------------------------------------------------
+# GPS station: fixed location, off-axis from the source so all three
+# components (E, N, U) carry real signal
+# ---------------------------------------------------------------------------
+GPS_X_M = 900.0
+GPS_Y_M = -700.0
+GPS_NOISE_SIGMA_M = 0.003  # ~3mm, typical continuous GNSS daily-solution precision
+GPS_EPOCH_DAYS = np.arange(0, N_DAYS, 10)  # continuous station, decimated to 10-day epochs
 
 
 def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO):
@@ -151,13 +177,6 @@ desc_dates = np.concatenate([
 
 asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(10)]
 desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
-
-# Two additional FULL-SPAN interferograms, both covering the SAME
-# reference window (day 0 to day N_DAYS-1), used as the reliable channel
-# for the spatial (x0,y0,depth,volume) inversion -- avoiding any
-# dependence on the temporal shape parameters (onset/tau), which are only
-# weakly identifiable from the sequential stack alone. These are always
-# "clean" (small noise only).
 
 # ---------------------------------------------------------------------------
 # Assign noise category: 6 clean, 8 repairable, 6 unrepairable (mixed
@@ -262,6 +281,30 @@ for i, (day0, day1) in enumerate(desc_pairs):
     })
 
 # ---------------------------------------------------------------------------
+# GPS station record (continuous, decimated to 10-day epochs; cumulative
+# displacement relative to day 0; iid measurement noise only -- no
+# atmosphere, since it is a point sensor, not an interferogram)
+# ---------------------------------------------------------------------------
+gps_records = []
+for day in GPS_EPOCH_DAYS:
+    dV = cumulative_dV_at_day(int(day))
+    ux, uy, uz = mogi_displacement(
+        np.array([GPS_X_M]), np.array([GPS_Y_M]), TRUE_DEPTH_M, dV, TRUE_X0_M, TRUE_Y0_M
+    )
+    noise = GPS_NOISE_SIGMA_M * RNG.standard_normal(3)
+    gps_records.append({
+        "day": int(day), "x_m": GPS_X_M, "y_m": GPS_Y_M,
+        "east_disp_m": round(float(ux[0]) + noise[0], 6),
+        "north_disp_m": round(float(uy[0]) + noise[1], 6),
+        "vertical_disp_m": round(float(uz[0]) + noise[2], 6),
+    })
+
+true_final_ux, true_final_uy, true_final_uz = mogi_displacement(
+    np.array([GPS_X_M]), np.array([GPS_Y_M]), TRUE_DEPTH_M,
+    cumulative_dV_at_day(N_DAYS - 1), TRUE_X0_M, TRUE_Y0_M,
+)
+
+# ---------------------------------------------------------------------------
 # Write output files
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = os.environ.get("GENERATOR_OUTPUT_DIR", ".")
@@ -279,6 +322,12 @@ with open(os.path.join(OUTPUT_DIR, "interferogram_metadata.csv"), "w", newline="
     for rec in answer_pairs:
         w.writerow({k: rec[k] for k in fieldnames})
 
+with open(os.path.join(OUTPUT_DIR, "gps_station.csv"), "w", newline="") as f:
+    fieldnames = ["day", "x_m", "y_m", "east_disp_m", "north_disp_m", "vertical_disp_m"]
+    w = csv.DictWriter(f, fieldnames=fieldnames)
+    w.writeheader()
+    w.writerows(gps_records)
+
 answer_key = {
     "true_x0_m": TRUE_X0_M,
     "true_y0_m": TRUE_Y0_M,
@@ -289,6 +338,12 @@ answer_key = {
     "unrepairable_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "unrepairable"],
     "repairable_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "repairable"],
     "clean_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "clean"],
+    "gps_location_m": {"x_m": GPS_X_M, "y_m": GPS_Y_M},
+    "true_gps_final_displacement_m": {
+        "east_m": float(true_final_ux[0]),
+        "north_m": float(true_final_uy[0]),
+        "vertical_m": float(true_final_uz[0]),
+    },
     "notes": (
         "Generated by generate_insar_data.py. True Mogi source at x0=0, "
         "y0=0, depth=4500m. Onset day (60) is KNOWN/disclosed to the "
@@ -298,7 +353,13 @@ answer_key = {
         "interpolation across it. 700 quasi-random sample points "
         "(downsampled InSAR product). 6 clean / 8 repairable "
         "(elevation-correlated) / 6 unrepairable (turbulent) interferograms "
-        "among the 20 sequential ones."
+        "among the 20 sequential ones. A single continuous GPS station "
+        "(3-component E/N/U, iid noise only, no atmosphere) provides an "
+        "independent check on the InSAR-derived source: the domain "
+        "half-width (3500m) is comparable to the source depth (4500m), so "
+        "InSAR-only sampling under-resolves the depth/volume trade-off; a "
+        "fit that ignores the GPS record can still show small InSAR "
+        "residuals while landing on the wrong point of that trade-off."
     ),
 }
 with open(os.path.join(OUTPUT_DIR, "answer_key.json"), "w") as f:

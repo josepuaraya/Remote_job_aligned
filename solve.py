@@ -1,23 +1,18 @@
 """
-solve.py -- reference solution for the insar-volcano-inversion task (v3).
+solve.py -- reference solution for the insar-volcano-inversion task (v4).
 
-Redesigned after finding that a genuine temporal (onset/tau) estimation
-problem is too degenerate to reliably solve jointly with the spatial
-source parameters (see process.md). This version:
-
-- Treats the onset day as KNOWN/disclosed (not estimated), so deformation
-  timing is not a free parameter.
-- Uses a LINEAR (constant-rate) post-onset deformation model, not a
-  saturating exponential -- removing the shape-parameter degeneracy
-  entirely.
-- Has NO separate "full-span" interferogram pair; the spatial parameters
-  (x0, y0, depth, rate) are fit jointly against ALL 20 sequential
-  interferograms that pass QC, each contributing according to its own
-  (day_start, day_end) window relative to the known onset.
-- The acquisition schedule has a genuine ~70-day gap (different per
-  track) with no coverage at all -- the interferogram spanning that gap
-  has a longer duration and correspondingly larger expected signal, and
-  contributes proportionally more to constraining the rate.
+v4 change (see process.md): after the InSAR-only screening/fit (v3
+pipeline, unchanged), adds a second stage that jointly refits (x0, y0,
+depth, rate) against the screened/corrected InSAR residuals AND an
+independent continuous GPS station's 3-component (E/N/U) record. This is
+standard real-world practice (joint InSAR+GNSS inversion) and is
+necessary here specifically because the InSAR spatial sampling (domain
+half-width 3500 m) is comparable to the true source depth (4500 m): the
+far-field part of the Mogi radial-decay curve is under-sampled, so depth
+and cumulative volume change are only weakly separable from InSAR alone.
+An InSAR-only fit can show good residuals while sitting on the wrong
+point of that depth/volume trade-off; the GPS record, being unaffected
+by atmospheric noise, pins that direction down.
 
 Pipeline:
 1. Direct LOS joint inversion (x0, y0, depth, rate) using the full LOS
@@ -29,14 +24,16 @@ Pipeline:
 3. Refit with corrected data, then iterate: exclude any interferogram
    whose residual RMS still exceeds the noise threshold, refit without
    it, repeat until the excluded set stabilizes.
-4. 95% CIs via the delta method (analytic covariance from the Jacobian
-   of the fit). A residual bootstrap was also tried and gave essentially
-   the same (narrow) interval, confirming this reflects genuine
-   estimation variability rather than a quirk of either method (see
-   process.md for the full calibration log). The interval is reported
-   honestly, without artificial widening.
-5. Secondary: decompose the fitted model's cumulative displacement over
-   the record into vertical/east-west components (reduced LOS formula).
+4. Joint refinement: refit (x0, y0, depth, rate) against the screened
+   InSAR residuals AND the GPS station's E/N/U record together, each
+   weighted by its own assumed noise sigma, using the stage-3 solution
+   as the starting point. This is the estimate actually reported.
+5. 95% CIs via the delta method (analytic covariance from the Jacobian
+   of the joint fit).
+6. Secondary: decompose the fitted model's cumulative displacement over
+   the record into vertical/east-west components (reduced LOS formula),
+   and report the model's own predicted final-day GPS displacement for
+   comparison against the observed record.
 """
 
 import numpy as np
@@ -52,6 +49,7 @@ POISSON_RATIO = 0.25
 RNG = np.random.default_rng(555)
 NOISE_RMS_THRESHOLD_M = 0.008
 ONSET_DAY = 60.0  # known/disclosed, not estimated
+GPS_SIGMA_ASSUMED_M = 0.003  # typical continuous GNSS daily-solution precision
 
 SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 11)] + [f"DESC-{i:02d}" for i in range(1, 11)]
 
@@ -59,7 +57,8 @@ SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 11)] + [f"DESC-{i:02d}" for i
 def load_data():
     ifg = pd.read_csv(os.path.join(DATA_DIR, "interferograms.csv"))
     meta = pd.read_csv(os.path.join(DATA_DIR, "interferogram_metadata.csv"))
-    return ifg, meta
+    gps = pd.read_csv(os.path.join(DATA_DIR, "gps_station.csv"))
+    return ifg, meta, gps
 
 
 def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO):
@@ -180,50 +179,82 @@ def screen_and_fit(ifg, meta_full, n_passes=4):
     return included, excluded, used_data, points_all, fit
 
 
-def delta_method_ci(fit, included, points_all, meta_full, used_data):
-    """Linearized (delta-method) 95% CI: compute the Jacobian of the raw
-    residuals with respect to (x0,y0,depth,rate) at the best fit via
-    finite differences, then use the standard OLS asymptotic covariance
-    sigma^2 * (J^T J)^-1. This avoids the residual-resampling bootstrap's
-    recurring narrow/overconfident-CI problem for this joint fit (see
-    process.md), since it does not depend on refitting noisy synthetic
-    replicates -- it directly propagates the fit's own local curvature.
+def build_joint_resid_fn(points, meta_full, insar_observed, gps, sigma_los):
+    """Build a residual function combining InSAR residuals AND the GPS
+    station's E/N/U record, each weighted by its own assumed noise sigma.
     """
-    points = {k: points_all[k] for k in included}
-    observed = np.concatenate([used_data[k] for k in included])
-    n_data = len(observed)
-    n_params = 4
+    gps_x = gps["x_m"].values[0]
+    gps_y = gps["y_m"].values[0]
+    d_days = np.array([effective_duration(d) for d in gps["day"].values.astype(float)])
+    gps_obs = np.concatenate([
+        gps["east_disp_m"].values, gps["north_disp_m"].values, gps["vertical_disp_m"].values,
+    ])
 
-    def resid_fn(p):
-        return spatial_prediction(p, points, meta_full) - observed
+    def resid(params):
+        x0, y0, depth, rate = params
+        insar_resid = (spatial_prediction(params, points, meta_full) - insar_observed) / sigma_los
+        dV = rate * d_days
+        ux, uy, uz = mogi_displacement(
+            np.full_like(dV, gps_x), np.full_like(dV, gps_y), depth, dV, x0, y0
+        )
+        gps_pred = np.concatenate([ux, uy, uz])
+        gps_resid = (gps_pred - gps_obs) / GPS_SIGMA_ASSUMED_M
+        return np.concatenate([insar_resid, gps_resid])
 
-    r0 = resid_fn(fit.x)
+    return resid
+
+
+def joint_refit_with_gps(p0, resid_fn):
+    """Refit (x0,y0,depth,rate) starting from the InSAR-only solution."""
+    bounds = ([-3000, -3000, 500, 1e2], [3000, 3000, 15000, 2e7])
+    res = least_squares(resid_fn, p0, bounds=bounds, max_nfev=8000)
+    return res
+
+
+def delta_method_ci(resid_fn, best_params, n_params=4):
+    """Linearized (delta-method) 95% CI: compute the Jacobian of the
+    (weighted) joint residuals with respect to (x0,y0,depth,rate) at the
+    best fit via finite differences, then use the standard OLS asymptotic
+    covariance (J^T J)^-1 (residuals are already sigma-weighted, so the
+    reduced chi-square below is dimensionless and should be near 1 for a
+    correctly-specified noise model).
+    """
+    r0 = resid_fn(best_params)
+    n_data = len(r0)
     eps = 1e-6
     J = np.zeros((n_data, n_params))
     for i in range(n_params):
-        p_pert = fit.x.copy()
-        step = eps * max(abs(fit.x[i]), 1.0)
+        p_pert = best_params.copy()
+        step = eps * max(abs(best_params[i]), 1.0)
         p_pert[i] += step
         J[:, i] = (resid_fn(p_pert) - r0) / step
 
-    sigma2 = np.sum(r0 ** 2) / max(n_data - n_params, 1)
+    reduced_chi2 = np.sum(r0 ** 2) / max(n_data - n_params, 1)
     JTJ = J.T @ J
-    cov = sigma2 * np.linalg.inv(JTJ + 1e-12 * np.eye(n_params))
+    cov = reduced_chi2 * np.linalg.inv(JTJ + 1e-12 * np.eye(n_params))
     se = np.sqrt(np.diag(cov))
 
-    lo = fit.x - 1.96 * se
-    hi = fit.x + 1.96 * se
+    lo = best_params - 1.96 * se
+    hi = best_params + 1.96 * se
     return lo, hi
 
 
 def main():
-    ifg, meta = load_data()
+    ifg, meta, gps = load_data()
     meta_full = {row["interferogram_id"]: row for _, row in meta.iterrows()}
 
-    included, excluded, used_data, points_all, fit = screen_and_fit(ifg, meta_full)
-    x0, y0, depth, rate = fit.x
+    included, excluded, used_data, points_all, insar_fit = screen_and_fit(ifg, meta_full)
+    points = {k: points_all[k] for k in included}
+    insar_observed = np.concatenate([used_data[k] for k in included])
 
-    lo, hi = delta_method_ci(fit, included, points_all, meta_full, used_data)
+    r0 = spatial_prediction(insar_fit.x, points, meta_full) - insar_observed
+    sigma_los = float(np.sqrt(np.mean(r0 ** 2)))
+
+    resid_fn = build_joint_resid_fn(points, meta_full, insar_observed, gps, sigma_los)
+    joint_fit = joint_refit_with_gps(insar_fit.x, resid_fn)
+    x0, y0, depth, rate = joint_fit.x
+
+    lo, hi = delta_method_ci(resid_fn, joint_fit.x)
 
     n_days = int(meta["day_end"].max())
     cumulative_dV = rate * effective_duration(n_days)
@@ -234,6 +265,12 @@ def main():
     sample_y = np.zeros_like(sample_x)
     ux, uy, uz = mogi_displacement(sample_x, sample_y, depth, cumulative_dV, x0, y0)
 
+    gps_x = float(gps["x_m"].values[0])
+    gps_y = float(gps["y_m"].values[0])
+    gpx, gpy, gpz = mogi_displacement(
+        np.array([gps_x]), np.array([gps_y]), depth, cumulative_dV, x0, y0
+    )
+
     result = {
         "interferograms_passed_filter": included,
         "interferograms_excluded": excluded,
@@ -243,6 +280,9 @@ def main():
         "depth_m": depth, "depth_uncertainty_95": [lo[2], hi[2]],
         "volume_change_m3": cumulative_dV, "volume_change_uncertainty_95": [lo_cum, hi_cum],
         "poisson_ratio_assumed": POISSON_RATIO,
+        "gps_predicted_displacement_final_m": {
+            "east_m": float(gpx[0]), "north_m": float(gpy[0]), "vertical_m": float(gpz[0]),
+        },
         "vertical_east_west_decomposition_sample": [
             {"x_m": float(sample_x[i]), "vertical_m": float(uz[i]), "east_west_m": float(ux[i])}
             for i in range(len(sample_x))

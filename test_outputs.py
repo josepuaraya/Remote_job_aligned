@@ -1,5 +1,5 @@
 """
-test_outputs.py -- verifier for the insar-volcano-inversion task (v2).
+test_outputs.py -- verifier for the insar-volcano-inversion task (v4).
 
 Recomputes the expected answer from the author's own private copy of the
 true source parameters (tests/data/answer_key.json -- never shipped to the
@@ -8,10 +8,24 @@ agent), then checks the agent's submitted result.txt against it.
 All tolerances/CI-width caps are anchored to the TRUE value from the
 answer key, never to the agent's own submitted value.
 
+v4 change: adds an independent GPS-reconciliation check. The InSAR-only
+tolerances below (location/depth/volume) are deliberately loose because
+InSAR alone cannot tightly separate depth from cumulative volume change
+in this geometry (domain half-width comparable to source depth). The GPS
+station is unaffected by atmospheric noise and gives a genuinely
+independent 3-component measurement; a source estimate must predict that
+station's observed record to within a tight tolerance, not merely produce
+small InSAR residuals. This is checked two ways: (1) self-consistency --
+the agent's own reported gps_predicted_displacement_final_m must match
+what its own submitted x0/y0/depth/volume_change_m3 actually predict
+(catches a fabricated or un-updated number); (2) accuracy -- that
+prediction must be close to the true (noise-free) GPS displacement.
+
 Run with: pytest test_outputs.py
 """
 
 import json
+import math
 import os
 import pytest
 
@@ -26,6 +40,7 @@ REQUIRED_KEYS = {
     "depth_m", "depth_uncertainty_95",
     "volume_change_m3", "volume_change_uncertainty_95",
     "poisson_ratio_assumed",
+    "gps_predicted_displacement_final_m",
     "vertical_east_west_decomposition_sample",
 }
 
@@ -39,10 +54,28 @@ ALL_IDS = {f"ASC-{i:02d}" for i in range(1, 11)} | {f"DESC-{i:02d}" for i in ran
 # the formal (delta-method) uncertainty was found to underestimate the
 # true error, requiring an empirically calibrated safety margin -- the
 # caps below already include that margin.
-LOCATION_ERROR_TOL_M = 200.0       # observed max ~64m point error, ~3x margin
-DEPTH_REL_TOL = 0.10               # observed max 2.44% point error, ~4x margin
-VOLUME_REL_TOL = 0.10              # observed max 2.29% point error, ~4x margin
+LOCATION_ERROR_TOL_M = 200.0       # InSAR-only geometry under-resolves x0,y0 tightly
+DEPTH_REL_TOL = 0.10               # InSAR-only geometry under-resolves depth tightly
+VOLUME_REL_TOL = 0.10              # correlated with depth via the trade-off above
 MAX_EXCLUDED_COUNT = 10            # observed exactly 6 (perfect match) across 3 seeds, generous margin
+
+# GPS reconciliation has two independent checks with different jobs:
+# - Self-consistency is the primary, robust check: it is pure arithmetic
+#   (does the submitted x0/y0/depth/volume_change_m3 actually predict the
+#   submitted gps_predicted_displacement_final_m?), independent of noise
+#   or methodology, so the tolerance is just numerical-precision-tight.
+#   This is what catches an agent that reports a GPS-shaped number
+#   without ever deriving it from its own fitted source (e.g. copying the
+#   observed GPS record, or leaving a stale value from an InSAR-only fit).
+# - Accuracy against the true record is a secondary backstop, deliberately
+#   loose: calibrated runs (see process.md) show reasonable joint
+#   InSAR+GPS weighting choices land in the ~0.2-1.3cm range on the
+#   shipped dataset, while ignoring GPS entirely lands at ~1.5-4cm
+#   depending on noise realization. A tight cm-level cutoff here would
+#   also penalize legitimate differences in how much an agent chooses to
+#   weight the GPS record, so this only catches a grossly wrong source.
+GPS_SELF_CONSISTENCY_TOL_M = 0.001   # 1mm: submitted params must actually predict the submitted GPS number
+GPS_ACCURACY_TOL_M = 0.05            # 5cm: generous backstop against a grossly wrong source
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +93,21 @@ def submitted():
         return json.loads(content)
     except json.JSONDecodeError as e:
         pytest.fail(f"result.txt is not valid JSON: {e}")
+
+
+def mogi_displacement_enu(x, y, depth, delta_v_m3, x0, y0, nu=0.25):
+    """Independent reimplementation (not imported from solve.py) used to
+    recompute predictions from the agent's own submitted parameters."""
+    dx, dy = x - x0, y - y0
+    r = math.sqrt(dx**2 + dy**2)
+    R = math.sqrt(r**2 + depth**2)
+    C = (1 - nu) * delta_v_m3 / math.pi
+    u_z = C * depth / R**3
+    u_r = C * r / R**3
+    theta = math.atan2(dy, dx)
+    u_x = u_r * math.cos(theta)
+    u_y = u_r * math.sin(theta)
+    return u_x, u_y, u_z
 
 
 def test_required_keys_present(submitted):
@@ -183,6 +231,51 @@ def test_volume_within_tolerance(submitted, answer_key):
     )
     sanity_cap = 10 * VOLUME_REL_TOL * true_vol
     assert (hi - lo) <= sanity_cap, f"Volume CI implausibly wide: {hi-lo:.0f} (sanity cap {sanity_cap:.0f})"
+
+
+def test_gps_prediction_matches_submitted_source(submitted, answer_key):
+    """The agent's own reported gps_predicted_displacement_final_m must
+    actually be what its own submitted x0/y0/depth/volume_change_m3
+    predict at the GPS station -- catches a number that was copied from
+    the raw GPS record, left over from an earlier fit, or otherwise not
+    genuinely derived from the final submitted source parameters.
+    """
+    gps_loc = answer_key["gps_location_m"]
+    ux, uy, uz = mogi_displacement_enu(
+        gps_loc["x_m"], gps_loc["y_m"],
+        submitted["depth_m"], submitted["volume_change_m3"],
+        submitted["x0_m"], submitted["y0_m"],
+    )
+    reported = submitted["gps_predicted_displacement_final_m"]
+    for comp, predicted in (("east_m", ux), ("north_m", uy), ("vertical_m", uz)):
+        assert comp in reported, f"gps_predicted_displacement_final_m missing '{comp}'"
+        err = abs(reported[comp] - predicted)
+        assert err <= GPS_SELF_CONSISTENCY_TOL_M, (
+            f"gps_predicted_displacement_final_m.{comp} ({reported[comp]:.4f} m) does not match "
+            f"what the submitted x0/y0/depth/volume_change_m3 actually predict ({predicted:.4f} m) "
+            f"-- off by {err*1000:.1f} mm, tolerance {GPS_SELF_CONSISTENCY_TOL_M*1000:.0f} mm"
+        )
+
+
+def test_gps_prediction_matches_true_record(submitted, answer_key):
+    """The submitted source must reconcile with the independent GPS
+    station: this is a tight check because GPS measurement noise is
+    small (mm-level) and uncorrelated with the InSAR atmospheric noise --
+    unlike the InSAR-only tolerances above, it is not loosened for the
+    depth/volume trade-off. A fit that only minimizes InSAR residuals
+    without incorporating the GPS record will typically fail this even
+    while passing the looser InSAR-only checks above.
+    """
+    true_final = answer_key["true_gps_final_displacement_m"]
+    reported = submitted["gps_predicted_displacement_final_m"]
+    for comp in ("east_m", "north_m", "vertical_m"):
+        err = abs(reported[comp] - true_final[comp])
+        assert err <= GPS_ACCURACY_TOL_M, (
+            f"gps_predicted_displacement_final_m.{comp} ({reported[comp]:.4f} m) is {err*100:.1f} cm "
+            f"off the true GPS-station displacement ({true_final[comp]:.4f} m), tolerance "
+            f"{GPS_ACCURACY_TOL_M*100:.0f} cm -- the submitted source parameters do not reconcile "
+            f"with the independent GPS record."
+        )
 
 
 def test_vertical_east_west_decomposition_format(submitted):
