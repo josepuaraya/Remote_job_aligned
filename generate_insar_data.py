@@ -1,6 +1,23 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v8).
+insar-volcano-inversion task (v9).
+
+v9 change: real trajectory-review evidence (v8) showed Claude clearing the
+task too easily (0-1 genuine failures of 4 trials; the difficulty gate
+needs >=2), while Codex and Gemini were already failing genuinely on the
+discrete-defect check added in v8. Rather than touching that mechanism
+(which is working correctly), this strengthens a different, already-latent
+one: the elevation "volcano peak" sits close to the true source, so
+elevation and real deformation are genuinely correlated, and an agent that
+applies the elevation regression automatically -- without checking it
+actually reduces the residual against the fitted model -- removes real
+signal along with noise. This was already true in earlier versions but
+undocumented and uncalibrated; it is now amplified to a validated,
+seed-swept ceiling (~1.5x the original coefficient) where a correctly-gated
+implementation still comfortably recovers the source with real margin, but
+an automatic/ungated correction's error gets substantially, consistently
+worse. Pushing further breaks the correctly-gated pipeline itself (see the
+comment at ELEV_CORR_COEFF_RANGE), so this stops well short of that.
 
 v8 change: real trajectory-review evidence showed that even after v7,
 agents correctly identify and exclude the discrete-defect (unwrap-jump)
@@ -271,7 +288,24 @@ for slot in UNWRAP_JUMP_ASC_SLOTS:
 for slot in UNWRAP_JUMP_DESC_SLOTS:
     desc_categories.insert(slot, "unwrap_jump")
 
-ELEV_CORR_COEFF_RANGE = (0.000006, 0.000012)
+# The elevation "volcano peak" (ELEV_PEAK_X_M, ELEV_PEAK_Y_M below) sits close
+# to the true source -- a realistic touch, since a volcano's own edifice
+# typically sits above its magma reservoir -- which means elevation and the
+# real deformation signal are genuinely correlated here (r~-0.44 for a
+# representative post-onset interferogram), not independent. An agent that
+# applies the elevation regression automatically, without checking that it
+# actually reduces the residual against the fitted model, removes real
+# signal along with the atmospheric term, not just a theoretical risk.
+# The coefficient magnitude below is calibrated (swept and validated across
+# 5 seeds) to a level where a correctly-gated correction still comfortably
+# recovers the source (well within tolerance, with real margin on the
+# exclusion-count cap too), while an ungated/automatic correction's error
+# gets consistently, substantially worse. Pushing this further starts to
+# break the correctly-gated pipeline itself (some genuinely repairable
+# interferograms can no longer be brought under the noise threshold at all,
+# which would corrupt the "repairable" label's own meaning), so this sits
+# at roughly 1.5x the original per-seed-validated safe ceiling, not higher.
+ELEV_CORR_COEFF_RANGE = (0.000009, 0.000018)
 REPAIRABLE_TURBULENT_SIGMA_M = 0.004
 UNREPAIRABLE_NOISE_SIGMA_M = 0.012
 
