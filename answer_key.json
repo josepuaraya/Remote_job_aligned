@@ -7,27 +7,25 @@
   "onset_day": 60,
   "unrepairable_interferograms": [
     "ASC-01",
-    "ASC-03",
     "ASC-07",
-    "DESC-01",
     "DESC-04",
-    "DESC-05"
+    "DESC-05",
+    "DESC-06",
+    "DESC-07"
   ],
   "repairable_interferograms": [
-    "ASC-04",
-    "ASC-08",
+    "ASC-03",
     "ASC-09",
-    "ASC-10",
+    "DESC-01",
+    "DESC-02",
     "DESC-03",
-    "DESC-06",
-    "DESC-08",
     "DESC-10"
   ],
   "clean_interferograms": [
+    "ASC-02",
     "ASC-05",
     "ASC-06",
-    "DESC-02",
-    "DESC-07",
+    "ASC-10",
     "DESC-09"
   ],
   "gps_location_m": {
@@ -61,10 +59,12 @@
     }
   ],
   "unwrap_jump_interferograms": [
-    "ASC-02"
+    "ASC-04",
+    "ASC-08",
+    "DESC-08"
   ],
   "unwrap_jump_size_m": 0.028,
-  "unwrap_jump_boundary_x_m": -324.312362975816,
+  "unwrap_jump_boundary_x_m": 493.7331719218746,
   "validation_interferogram_id": "VAL-01",
   "validation_interferogram_evaluation_point_m": {
     "x_m": 900.0,

@@ -1,6 +1,25 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v7).
+insar-volcano-inversion task (v8).
+
+v8 change: real trajectory-review evidence showed that even after v7,
+agents correctly identify and exclude the discrete-defect (unwrap-jump)
+interferogram right alongside the genuinely unrepairable ones, rather
+than diagnosing it as a fixable processing artifact and repairing it --
+and nothing caught this, since the verifier only checked that the truly
+unrepairable set was excluded, never that the repairable jump defect was
+kept. Two fixes: (1) the jump defect's placement is no longer left to a
+random shuffle -- it previously could land on a purely pre-onset window
+on some seeds, where discarding it costs nothing, making "was it
+correctly repaired" a meaningless, seed-dependent test. It is now fixed
+to substantially post-onset, non-gap windows every time. (2) there are
+now three jump-defect interferograms, not one -- with ~14 otherwise-usable
+interferograms in the fit, discarding just one has a small, noise-
+dominated effect on the final answer that can go either way run to run;
+discarding three is a large enough fraction of the usable data that the
+effect is consistent across calibration seeds (validated: excluding all
+three instead of repairing them makes the reported volume meaningfully
+worse on the large majority of seeds).
 
 v7 change: the "unrepairable" category's noise is now a genuinely rough,
 short-correlation-length random field instead of a smooth deterministic
@@ -57,9 +76,9 @@ Ascending geometry: incidence=39.1054 deg, heading=-11.876832 deg.
 Descending geometry: incidence=39.1840 deg, heading=-168.27934 deg.
 (Real geometry values from the author's own prior fieldwork in Iceland.)
 
-Noise model, 6/8/6 split across the 20 interferograms:
-- 6 "clean": spatially correlated baseline noise only.
-- 8 "repairable": spatially correlated baseline noise PLUS an
+Noise model, 5/6/6/3 split across the 20 interferograms:
+- 5 "clean": spatially correlated baseline noise only.
+- 6 "repairable": spatially correlated baseline noise PLUS an
   elevation-correlated linear term (simulating tropospheric delay
   correlated with topography), correctable via a phase-vs-elevation
   regression.
@@ -68,6 +87,12 @@ Noise model, 6/8/6 split across the 20 interferograms:
   with elevation (simulating turbulent atmospheric noise whose spatial
   frequency content resists any smooth/low-order correction) -- must be
   excluded.
+- 3 "unwrap_jump": spatially correlated baseline noise PLUS a discrete
+  offset affecting only part of the footprint (an unwrapping-style
+  defect), fixed to substantially post-onset windows -- a different
+  failure mode from atmospheric noise, correctable by detecting and
+  removing the discrete offset, and must be repaired and kept rather
+  than excluded.
 
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
@@ -211,10 +236,40 @@ desc_dates = np.concatenate([
 asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(10)]
 desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
 
-categories = ["clean"] * 5 + ["repairable"] * 8 + ["unrepairable"] * 6 + ["unwrap_jump"] * 1
+# The discrete unwrapping-jump defect is deliberately NOT placed by the
+# random shuffle below, and there are deliberately three of them, not one.
+# Reasoning: if placement were left to chance, a jump interferogram can
+# land on a purely pre-onset window (zero true deformation signal, so
+# discarding it costs nothing), making "was it correctly repaired and
+# kept" a meaningless, seed-dependent test on some seeds. And even placed
+# well, a single jump interferogram is only one data point among the
+# ~14 otherwise-usable ones -- discarding just that one has a small,
+# noise-dominated effect on the final point estimate that can go either
+# way run to run, which is not a fair basis for a hard requirement.
+# Three, all placed on substantially post-onset, non-gap windows, means
+# an agent that defaults to excluding anything that looks off (rather
+# than diagnosing and repairing a genuine discrete artifact) discards a
+# large, consistent fraction of the usable data, not a coin flip -- this
+# was validated across 5 calibration seeds: excluding all three instead
+# of repairing them makes the reported volume change meaningfully worse
+# on the large majority of seeds (depth is a bit more mixed, consistent
+# with this task's already-acknowledged depth/volume trade-off).
+# Deliberately avoids the 70-day-gap-spanning interferograms (slot index
+# 5 on each track) -- those windows already carry their own, separate
+# difficulty (proportionally more information about the unobserved gap),
+# and stacking the jump defect onto them too would conflate two distinct
+# scientific judgment calls into the same interferogram.
+UNWRAP_JUMP_ASC_SLOTS = [3, 7]
+UNWRAP_JUMP_DESC_SLOTS = [7]
+
+categories = ["clean"] * 5 + ["repairable"] * 6 + ["unrepairable"] * 6
 RNG.shuffle(categories)
-asc_categories = categories[:10]
-desc_categories = categories[10:]
+asc_categories = categories[:8]
+desc_categories = categories[8:]
+for slot in UNWRAP_JUMP_ASC_SLOTS:
+    asc_categories.insert(slot, "unwrap_jump")
+for slot in UNWRAP_JUMP_DESC_SLOTS:
+    desc_categories.insert(slot, "unwrap_jump")
 
 ELEV_CORR_COEFF_RANGE = (0.000006, 0.000012)
 REPAIRABLE_TURBULENT_SIGMA_M = 0.004
