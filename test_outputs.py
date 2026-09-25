@@ -290,12 +290,16 @@ def test_gps_prediction_matches_submitted_source(submitted, answer_key):
 
 def test_gps_prediction_matches_true_record(submitted, answer_key):
     """The submitted source must reconcile with the independent GPS
-    station: this is a tight check because GPS measurement noise is
-    small (mm-level) and uncorrelated with the InSAR atmospheric noise --
-    unlike the InSAR-only tolerances above, it is not loosened for the
-    depth/volume trade-off. A fit that only minimizes InSAR residuals
-    without incorporating the GPS record will typically fail this even
-    while passing the looser InSAR-only checks above.
+    station -- but this is a generous backstop (5cm), not a tight check,
+    despite the GPS station's own measurement noise being small (mm-level)
+    and uncorrelated with the InSAR atmospheric noise. Calibration (see
+    process.md) found the depth/volume trade-off this targets is real but
+    modest, and itself sensitive to legitimate differences in how an
+    agent weights the GPS record against the InSAR data -- a tight
+    cm-level cutoff would risk failing a genuinely correct joint
+    inversion over an implementation choice. This only catches a grossly
+    wrong source; the primary, tight check is self-consistency
+    (test_gps_prediction_matches_submitted_source, 1mm), not this one.
     """
     true_final = answer_key["true_gps_final_displacement_m"]
     reported = submitted["gps_predicted_displacement_final_m"]
