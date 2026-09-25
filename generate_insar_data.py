@@ -178,7 +178,7 @@ desc_dates = np.concatenate([
 asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(10)]
 desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
 
-categories = ["clean"] * 6 + ["repairable"] * 8 + ["unrepairable"] * 6
+categories = ["clean"] * 5 + ["repairable"] * 8 + ["unrepairable"] * 6 + ["unwrap_jump"] * 1
 RNG.shuffle(categories)
 asc_categories = categories[:10]
 desc_categories = categories[10:]
@@ -186,6 +186,18 @@ desc_categories = categories[10:]
 ELEV_CORR_COEFF_RANGE = (0.000006, 0.000012)
 REPAIRABLE_TURBULENT_SIGMA_M = 0.004
 UNREPAIRABLE_NOISE_SIGMA_M = 0.012
+
+# Unwrapping-error defect: a discrete offset (a phase-ambiguity-sized jump,
+# ~2.8cm -- realistic for a C-band radar) affecting points on one side of a
+# random spatial split, riding on otherwise-clean correlated noise. Not
+# correlated with elevation, so the existing phase-elevation correction
+# cannot fix it -- and not smooth/large-scale like the unrepairable category,
+# so a naive residual-magnitude read treats it like ordinary turbulent noise.
+# Genuinely repairable (by detecting and correcting the discrete step), but
+# only by a method that looks for a discontinuity, not the elevation
+# regression already implemented for the "repairable" category.
+UNWRAP_JUMP_SIZE_M = 0.028
+_unwrap_jump_boundary_x = float(RNG.uniform(-1000.0, 1000.0))
 
 
 def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
@@ -211,6 +223,10 @@ def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
         raw_field = raw_field - np.mean(raw_field)
         raw_field = raw_field / np.std(raw_field) * UNREPAIRABLE_NOISE_SIGMA_M
         noise = noise + raw_field * RNG.choice([-1, 1])
+    elif category == "unwrap_jump":
+        jump_sign = RNG.choice([-1, 1])
+        jump = np.where(x_pts > _unwrap_jump_boundary_x, UNWRAP_JUMP_SIZE_M * jump_sign, 0.0)
+        noise = noise + jump
 
     los_observed = los_true + noise
     return los_observed
@@ -255,6 +271,31 @@ for i, (day0, day1) in enumerate(desc_pairs):
     })
 
 # ---------------------------------------------------------------------------
+# Held-out validation interferogram: same schema and noise character as a
+# "clean" sequential interferogram, but explicitly NOT part of the
+# sequential fitting stack (ID prefix "VAL-", not "ASC-"/"DESC-"). Exists
+# to test predictive validation (was the fitted model derived from the
+# sequential stack ever checked against a genuinely unseen observation?)
+# rather than atmospheric-noise screening, which is unrelated.
+# ---------------------------------------------------------------------------
+VAL_DAY_START, VAL_DAY_END = 100, 180
+VAL_ID = "VAL-01"
+val_los_observed = make_interferogram(VAL_DAY_START, VAL_DAY_END, ASC_INCIDENCE_DEG, ASC_HEADING_DEG, "clean")
+for j in range(N_POINTS):
+    records.append({
+        "interferogram_id": VAL_ID, "point_id": j,
+        "x_m": round(x_pts[j], 2), "y_m": round(y_pts[j], 2),
+        "elevation_m": round(elevation_pts[j], 2),
+        "los_displacement_m": round(val_los_observed[j], 6),
+    })
+answer_pairs.append({
+    "interferogram_id": VAL_ID, "orbit": "ascending",
+    "day_start": VAL_DAY_START, "day_end": VAL_DAY_END,
+    "incidence_deg": ASC_INCIDENCE_DEG, "heading_deg": ASC_HEADING_DEG,
+    "true_category": "validation",
+})
+
+# ---------------------------------------------------------------------------
 # GNSS network: 3 continuous stations, fixed locations, decimated to
 # 10-day epochs. Each epoch/component gets ONE shared common-mode draw
 # (identical across stations that epoch) plus independent per-station
@@ -291,6 +332,21 @@ true_final_ux, true_final_uy, true_final_uz = mogi_displacement(
     np.array([primary["x_m"]]), np.array([primary["y_m"]]), TRUE_DEPTH_M,
     cumulative_dV_at_day(N_DAYS - 1), TRUE_X0_M, TRUE_Y0_M,
 )
+
+# True (noise-free) LOS value at the validation interferogram's evaluation
+# point (reuses the primary GNSS station's already-disclosed coordinates),
+# for the verifier's accuracy backstop.
+_val_dV0 = cumulative_dV_at_day(VAL_DAY_START)
+_val_dV1 = cumulative_dV_at_day(VAL_DAY_END)
+_val_ux0, _val_uy0, _val_uz0 = mogi_displacement(
+    np.array([primary["x_m"]]), np.array([primary["y_m"]]), TRUE_DEPTH_M, _val_dV0, TRUE_X0_M, TRUE_Y0_M
+)
+_val_ux1, _val_uy1, _val_uz1 = mogi_displacement(
+    np.array([primary["x_m"]]), np.array([primary["y_m"]]), TRUE_DEPTH_M, _val_dV1, TRUE_X0_M, TRUE_Y0_M
+)
+true_validation_los_m = float(los_projection_full(
+    _val_ux1 - _val_ux0, _val_uy1 - _val_uy0, _val_uz1 - _val_uz0, ASC_INCIDENCE_DEG, ASC_HEADING_DEG
+)[0])
 
 # ---------------------------------------------------------------------------
 # Write output files
@@ -337,8 +393,18 @@ answer_key = {
     "gnss_true_common_mode_sigma_m": GNSS_COMMON_MODE_SIGMA_M,
     "gnss_true_white_sigma_m": GNSS_WHITE_SIGMA_M,
     "gnss_stations_m": GNSS_STATIONS,
+    "unwrap_jump_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "unwrap_jump"],
+    "unwrap_jump_size_m": UNWRAP_JUMP_SIZE_M,
+    "unwrap_jump_boundary_x_m": _unwrap_jump_boundary_x,
+    "validation_interferogram_id": VAL_ID,
+    "validation_interferogram_evaluation_point_m": {"x_m": primary["x_m"], "y_m": primary["y_m"]},
+    "validation_interferogram_window": {
+        "day_start": VAL_DAY_START, "day_end": VAL_DAY_END,
+        "incidence_deg": ASC_INCIDENCE_DEG, "heading_deg": ASC_HEADING_DEG,
+    },
+    "true_validation_interferogram_los_m": true_validation_los_m,
     "notes": (
-        "Generated by generate_insar_data.py (v5). True Mogi source at "
+        "Generated by generate_insar_data.py (v6). True Mogi source at "
         "x0=0, y0=0, depth=4500m. Onset day (60) known/disclosed; linear "
         "post-onset rate. InSAR baseline noise is spatially correlated "
         "(exponential kernel, correlation length 400m, same marginal "
@@ -346,7 +412,11 @@ answer_key = {
         "calibration are unaffected. 3-station GNSS network with a "
         "shared per-epoch common-mode error plus independent per-station "
         "white noise. A correct inversion estimates both covariance "
-        "structures from the data and weights the joint fit accordingly."
+        "structures from the data and weights the joint fit accordingly. "
+        "One sequential interferogram carries a discrete unwrapping-style "
+        "jump instead of the usual repairable/unrepairable noise. A "
+        "held-out validation interferogram (VAL-01) is not part of the "
+        "sequential fitting stack at all."
     ),
 }
 with open(os.path.join(OUTPUT_DIR, "answer_key.json"), "w") as f:

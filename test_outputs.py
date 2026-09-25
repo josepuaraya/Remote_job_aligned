@@ -60,6 +60,7 @@ REQUIRED_KEYS = {
     "gps_predicted_displacement_final_m",
     "insar_covariance_estimate",
     "gnss_covariance_estimate",
+    "validation_interferogram_predicted_los_m",
     "vertical_east_west_decomposition_sample",
 }
 
@@ -108,6 +109,13 @@ INSAR_CORR_LENGTH_BOUNDS_M = (30.0, 2500.0)
 INSAR_SILL_BOUNDS_M2 = (5e-7, 5e-5)
 GNSS_SIGMA_BOUNDS_M = (0.0003, 0.02)
 
+# Held-out validation interferogram (VAL-01, not part of the sequential
+# fitting stack) -- same two-check pattern as GPS reconciliation:
+# self-consistency (pure arithmetic, tight) plus a generous accuracy
+# backstop.
+VAL_SELF_CONSISTENCY_TOL_M = 0.001   # 1mm: submitted params must actually predict the submitted value
+VAL_ACCURACY_TOL_M = 0.02            # 2cm: generous backstop -- VAL-01 carries only small correlated noise
+
 
 @pytest.fixture(scope="module")
 def answer_key():
@@ -139,6 +147,35 @@ def mogi_displacement_enu(x, y, depth, delta_v_m3, x0, y0, nu=0.25):
     u_x = u_r * math.cos(theta)
     u_y = u_r * math.sin(theta)
     return u_x, u_y, u_z
+
+
+def los_projection_full(u_e, u_n, u_u, incidence_deg, heading_deg):
+    """Independent reimplementation (not imported from solve.py)."""
+    theta = math.radians(incidence_deg)
+    alpha = math.radians(heading_deg)
+    return (math.sin(theta) * math.cos(alpha) * u_e
+            - math.sin(theta) * math.sin(alpha) * u_n
+            - math.cos(theta) * u_u)
+
+
+def predicted_validation_los(x0, y0, depth, volume_change_m3, answer_key, onset_day=60.0, record_last_day=364.0):
+    """Recompute what the submitted source parameters predict for the
+    held-out validation interferogram's LOS displacement, deriving the
+    implied constant post-onset rate from volume_change_m3 (disclosed to
+    be cumulative from day 0 to record_last_day), exactly as solve.py does.
+    """
+    rate = volume_change_m3 / max(record_last_day - onset_day, 1e-9)
+    win = answer_key["validation_interferogram_window"]
+    point = answer_key["validation_interferogram_evaluation_point_m"]
+
+    def eff_dur(day):
+        return max(0.0, day - onset_day)
+
+    dV0 = rate * eff_dur(win["day_start"])
+    dV1 = rate * eff_dur(win["day_end"])
+    ux0, uy0, uz0 = mogi_displacement_enu(point["x_m"], point["y_m"], depth, dV0, x0, y0)
+    ux1, uy1, uz1 = mogi_displacement_enu(point["x_m"], point["y_m"], depth, dV1, x0, y0)
+    return los_projection_full(ux1 - ux0, uy1 - uy0, uz1 - uz0, win["incidence_deg"], win["heading_deg"])
 
 
 def test_required_keys_present(submitted):
@@ -348,6 +385,44 @@ def test_gnss_covariance_estimate_is_plausible(submitted):
     assert lo <= est["white_sigma_m"] <= hi, (
         f"gnss_covariance_estimate.white_sigma_m ({est['white_sigma_m']}) "
         f"is outside the plausible range [{lo}, {hi}] m"
+    )
+
+
+def test_validation_interferogram_self_consistent(submitted, answer_key):
+    """The agent's own reported validation_interferogram_predicted_los_m
+    must actually be what its own submitted x0/y0/depth/volume_change_m3
+    predict for the held-out validation interferogram (VAL-01, not part
+    of the sequential fitting stack) -- pure arithmetic, so the tolerance
+    is numerical-precision-tight. Catches a value that was not genuinely
+    derived from the final submitted source parameters (e.g. copied from
+    the observed VAL-01 record, or never actually computed).
+    """
+    predicted = predicted_validation_los(
+        submitted["x0_m"], submitted["y0_m"], submitted["depth_m"], submitted["volume_change_m3"], answer_key,
+    )
+    reported = submitted["validation_interferogram_predicted_los_m"]
+    err = abs(reported - predicted)
+    assert err <= VAL_SELF_CONSISTENCY_TOL_M, (
+        f"validation_interferogram_predicted_los_m ({reported:.4f} m) does not match what the "
+        f"submitted x0/y0/depth/volume_change_m3 actually predict for VAL-01 ({predicted:.4f} m) "
+        f"-- off by {err*1000:.1f} mm, tolerance {VAL_SELF_CONSISTENCY_TOL_M*1000:.0f} mm"
+    )
+
+
+def test_validation_interferogram_accuracy(submitted, answer_key):
+    """The submitted source must predict the held-out validation
+    interferogram reasonably well -- a generous backstop (VAL-01 carries
+    only small correlated noise, no atmospheric contamination), not the
+    primary discriminator. Primarily exercises predictive validation: was
+    the fitted model ever checked against a genuinely unseen observation,
+    not just the data it was fit to.
+    """
+    predicted = submitted["validation_interferogram_predicted_los_m"]
+    true_val = answer_key["true_validation_interferogram_los_m"]
+    err = abs(predicted - true_val)
+    assert err <= VAL_ACCURACY_TOL_M, (
+        f"validation_interferogram_predicted_los_m ({predicted:.4f} m) is {err*100:.1f} cm off "
+        f"the true VAL-01 displacement ({true_val:.4f} m), tolerance {VAL_ACCURACY_TOL_M*100:.0f} cm"
     )
 
 

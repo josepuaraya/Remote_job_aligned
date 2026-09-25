@@ -47,6 +47,7 @@ RNG = np.random.default_rng(555)
 NOISE_RMS_THRESHOLD_M = 0.008
 ONSET_DAY = 60.0
 PRIMARY_GNSS_ID = "GNSS-01"
+VAL_ID = "VAL-01"
 VARIOGRAM_MAX_LAG_M = 800.0
 VARIOGRAM_N_BINS = 10
 
@@ -98,6 +99,46 @@ def elevation_correct(ifg, ifg_id):
 
 def effective_duration(day, onset=ONSET_DAY):
     return max(0.0, day - onset)
+
+
+MIN_STEP_OFFSET_M = 0.02  # only accept a jump-sized offset, not any split that happens to help a little
+
+
+def step_correct(ifg, ifg_id, pred):
+    """Detect and correct a discrete step (unwrapping-style jump): try
+    splitting the interferogram's points along x at each decile, removing
+    the per-side residual mean difference, and keep whichever split
+    minimizes the residual RMS against the current model prediction. A
+    smooth atmospheric signal has no such split that helps much; a
+    genuine discrete jump does. Only accepted if the offset found is
+    jump-sized (MIN_STEP_OFFSET_M) -- otherwise a smooth, merely x-leaning
+    trend (e.g. the unrepairable category's large-scale field) can be
+    partially, spuriously absorbed by a well-placed split, which is not a
+    genuine step correction and must not be allowed to erode the
+    unrepairable-noise exclusion threshold.
+    """
+    sub = ifg[ifg.interferogram_id == ifg_id]
+    x = sub["x_m"].values
+    los = sub["los_displacement_m"].values
+    resid = los - pred
+
+    best_rms = np.sqrt(np.mean(resid ** 2))
+    best_corrected = los
+    for q in range(10, 100, 10):
+        thresh = np.percentile(x, q)
+        mask = x > thresh
+        if mask.sum() < 20 or (~mask).sum() < 20:
+            continue
+        offset = resid[mask].mean() - resid[~mask].mean()
+        if abs(offset) < MIN_STEP_OFFSET_M:
+            continue
+        corrected = los.copy()
+        corrected[mask] -= offset
+        rms = np.sqrt(np.mean((corrected - pred) ** 2))
+        if rms < best_rms:
+            best_rms = rms
+            best_corrected = corrected
+    return best_rms, best_corrected
 
 
 def spatial_prediction(params, points, meta_full):
@@ -158,7 +199,9 @@ def screen_and_fit(ifg, meta_full, n_passes=4):
             raw_rms = np.sqrt(np.mean((raw_all[ifg_id] - pred) ** 2))
             corrected = elevation_correct(ifg, ifg_id)
             corr_rms = np.sqrt(np.mean((corrected - pred) ** 2))
-            best_rms, best_data = (corr_rms, corrected) if corr_rms < raw_rms else (raw_rms, raw_all[ifg_id])
+            step_rms, step_corrected = step_correct(ifg, ifg_id, pred)
+            candidates = [(raw_rms, raw_all[ifg_id]), (corr_rms, corrected), (step_rms, step_corrected)]
+            best_rms, best_data = min(candidates, key=lambda c: c[0])
             new_used_data[ifg_id] = best_data
             if best_rms <= NOISE_RMS_THRESHOLD_M:
                 new_included.append(ifg_id)
@@ -383,6 +426,20 @@ def main():
         np.array([primary_row.x_m]), np.array([primary_row.y_m]), depth, cumulative_dV, x0, y0
     )
 
+    val_meta = meta_full[VAL_ID]
+    val_dV0 = rate * effective_duration(val_meta["day_start"])
+    val_dV1 = rate * effective_duration(val_meta["day_end"])
+    val_ux0, val_uy0, val_uz0 = mogi_displacement(
+        np.array([primary_row.x_m]), np.array([primary_row.y_m]), depth, val_dV0, x0, y0
+    )
+    val_ux1, val_uy1, val_uz1 = mogi_displacement(
+        np.array([primary_row.x_m]), np.array([primary_row.y_m]), depth, val_dV1, x0, y0
+    )
+    val_predicted_los = los_projection_full(
+        val_ux1 - val_ux0, val_uy1 - val_uy0, val_uz1 - val_uz0,
+        val_meta["incidence_deg"], val_meta["heading_deg"],
+    )
+
     result = {
         "interferograms_passed_filter": included,
         "interferograms_excluded": excluded,
@@ -401,6 +458,7 @@ def main():
         "gnss_covariance_estimate": {
             "common_mode_sigma_m": sigma_common, "white_sigma_m": sigma_white,
         },
+        "validation_interferogram_predicted_los_m": float(val_predicted_los[0]),
         "vertical_east_west_decomposition_sample": [
             {"x_m": float(sample_x[i]), "vertical_m": float(uz[i]), "east_west_m": float(ux[i])}
             for i in range(len(sample_x))
