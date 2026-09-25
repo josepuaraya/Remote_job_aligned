@@ -221,28 +221,36 @@ def estimate_insar_covariance(points_all, meta_full, included, used_data, params
     short lags (where genuine spatially-correlated noise dominates over
     any leftover large-scale structure from the elevation/turbulent
     correction terms), fit to an exponential model.
+
+    Interferograms do not share a common point set (decorrelation drops a
+    different, independently-varying subset of points per interferogram),
+    so each interferogram's own pairwise distances and residual pairs are
+    computed separately, using its own (x, y) points, and pooled into the
+    same lag bins -- rather than assuming one shared grid across all of
+    them.
     """
-    x = points_all[included[0]]["x"]
-    y = points_all[included[0]]["y"]
-    resid_matrix = np.array([
-        used_data[k] - spatial_prediction(params, {k: points_all[k]}, {k: meta_full[k]})
-        for k in included
-    ])
-
-    n = len(x)
-    dx = x[:, None] - x[None, :]
-    dy = y[:, None] - y[None, :]
-    dist = np.sqrt(dx**2 + dy**2)
-    iu = np.triu_indices(n, k=1)
-    d_pairs = dist[iu]
-
     bins = np.linspace(0, VARIOGRAM_MAX_LAG_M, VARIOGRAM_N_BINS + 1)
-    bin_idx = np.digitize(d_pairs, bins) - 1
     sums = np.zeros(VARIOGRAM_N_BINS)
     counts = np.zeros(VARIOGRAM_N_BINS)
-    for k in range(resid_matrix.shape[0]):
-        r = resid_matrix[k]
+    all_resid = []
+
+    for k in included:
+        x = points_all[k]["x"]
+        y = points_all[k]["y"]
+        n = len(x)
+        if n < 2:
+            continue
+        r = used_data[k] - spatial_prediction(params, {k: points_all[k]}, {k: meta_full[k]})
+        all_resid.append(r)
+
+        dx = x[:, None] - x[None, :]
+        dy = y[:, None] - y[None, :]
+        dist = np.sqrt(dx**2 + dy**2)
+        iu = np.triu_indices(n, k=1)
+        d_pairs = dist[iu]
         sq_diff = (r[iu[0]] - r[iu[1]]) ** 2
+
+        bin_idx = np.digitize(d_pairs, bins) - 1
         for b in range(VARIOGRAM_N_BINS):
             mask = bin_idx == b
             if mask.any():
@@ -264,9 +272,9 @@ def estimate_insar_covariance(points_all, meta_full, included, used_data, params
         )
         sill, corr_length = float(popt[0]), float(popt[1])
     except Exception:
-        sill, corr_length = float(np.var(resid_matrix)), 300.0
+        sill, corr_length = float(np.var(np.concatenate(all_resid))), 300.0
 
-    return sill, corr_length, x, y
+    return sill, corr_length
 
 
 def build_spatial_cholesky(x, y, sill, corr_length):
@@ -320,9 +328,12 @@ def build_gnss_cholesky(n_stations, sigma_common, sigma_white):
 def build_joint_resid_fn(points, meta_full, insar_observed, insar_L, insar_ids,
                           gnss, station_ids, gnss_L):
     """Combined GLS residual function: whitens InSAR residuals (per
-    interferogram, using the estimated spatial covariance's Cholesky
-    factor) and GNSS residuals (per epoch/component, using the estimated
-    compound-symmetry covariance's Cholesky factor), then concatenates.
+    interferogram, using that interferogram's own spatial covariance
+    Cholesky factor -- insar_L is a dict keyed by interferogram id, not a
+    single shared matrix, since interferograms do not share a common
+    point set) and GNSS residuals (per epoch/component, using the
+    estimated compound-symmetry covariance's Cholesky factor), then
+    concatenates.
     """
     station_coords = {sid: gnss[gnss.station_id == sid].iloc[0][["x_m", "y_m"]].values for sid in station_ids}
     epochs = sorted(gnss["day"].unique())
@@ -340,7 +351,7 @@ def build_joint_resid_fn(points, meta_full, insar_observed, insar_L, insar_ids,
         for ifg_id in insar_ids:
             pred = spatial_prediction(params, {ifg_id: points[ifg_id]}, {ifg_id: meta_full[ifg_id]})
             raw_r = pred - insar_observed[ifg_id]
-            insar_whitened.append(solve_triangular(insar_L, raw_r, lower=True))
+            insar_whitened.append(solve_triangular(insar_L[ifg_id], raw_r, lower=True))
         insar_whitened = np.concatenate(insar_whitened)
 
         gnss_whitened = []
@@ -395,10 +406,13 @@ def main():
     points = {k: points_all[k] for k in included}
     insar_observed = {k: used_data[k] for k in included}
 
-    sill, corr_length, x_used, y_used = estimate_insar_covariance(
+    sill, corr_length = estimate_insar_covariance(
         points_all, meta_full, included, used_data, insar_fit.x
     )
-    insar_L = build_spatial_cholesky(x_used, y_used, sill, corr_length)
+    insar_L = {
+        k: build_spatial_cholesky(points_all[k]["x"], points_all[k]["y"], sill, corr_length)
+        for k in included
+    }
 
     sigma_common, sigma_white = estimate_gnss_covariance(gnss, station_ids, insar_fit.x)
     gnss_L = build_gnss_cholesky(len(station_ids), sigma_common, sigma_white)

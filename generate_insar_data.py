@@ -1,6 +1,34 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v10).
+insar-volcano-inversion task (v11).
+
+v11 change: each interferogram now independently loses a different,
+randomly varying fraction of its points (roughly 50-70%, not a fixed
+count, and not the same missing points from one interferogram to the
+next) -- decorrelation, a genuine InSAR phenomenon (steep terrain, water,
+vegetation, and large/rapid phase gradients near an actively deforming
+area all lose coherence faster). This is a real data-engineering
+difficulty on its own: correctly combining interferograms that do not
+share a common point set (matching by point_id/coordinates rather than
+assuming a fixed shared grid) is required just to use the data at all.
+It required rewriting solve.py's covariance-weighting pipeline, which
+previously (silently) assumed every interferogram shared one common point
+grid -- estimate_insar_covariance now pools each interferogram's own
+pairwise residual structure into the same lag bins instead of reusing one
+interferogram's coordinates for all of them, and the InSAR whitening
+Cholesky factor is now built per interferogram (a dict, not one shared
+matrix). Validated across 5 calibration seeds: the reference solution
+still correctly excludes the true-unrepairable set and repairs-and-uses
+both jump interferograms every time, with real margin on every tolerance,
+despite the reduced and unevenly-sized point clouds. Full 16-test suite
+passes on the reference solution on every seed. Note, stated honestly:
+this does not resolve the open question of what makes Claude specifically
+fail -- every real trajectory-review run so far shows Claude correctly
+repairing the jump interferograms (never taking the "exclude instead"
+branch this and the previous two versions tried to make costlier), so
+none of v9/v10/v11 could have affected Claude's result. This version is
+shipped to test decorrelation as a new, previously-untested mechanism in
+its own right, not because it is expected to resolve that open question.
 
 v10 change: real trajectory-review evidence (v9) showed Claude still
 clearing the task cleanly (0 genuine failures of 4), and revealed a
@@ -388,13 +416,35 @@ def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
     return los_observed
 
 
+# ---------------------------------------------------------------------------
+# Decorrelation: real InSAR coherence is never complete across a whole
+# footprint (steep terrain, water, vegetation, and -- notably -- large or
+# rapid phase gradients near an actively deforming area all decorrelate
+# faster). Each interferogram independently loses a different, randomly
+# varying fraction of its points -- not a fixed count, and not the same
+# missing points from one interferogram to the next. This is a genuine
+# data-engineering difficulty, not just a data-volume one: correctly
+# handling per-interferogram point sets (matching by point_id/coordinates
+# rather than assuming a fixed shared grid) is required just to combine
+# the data at all, and the reference solution's own covariance-weighting
+# pipeline had to be rewritten to support it (see solve.py).
+# ---------------------------------------------------------------------------
+DECORRELATION_RETENTION_RANGE = (0.50, 0.70)  # ~60% average, varies per interferogram
+
+
+def draw_decorrelation_mask():
+    retention_frac = RNG.uniform(*DECORRELATION_RETENTION_RANGE)
+    n_keep = int(round(N_POINTS * retention_frac))
+    return np.sort(RNG.choice(N_POINTS, size=n_keep, replace=False))
+
+
 records = []
 answer_pairs = []
 for i, (day0, day1) in enumerate(asc_pairs):
     ifg_id = f"ASC-{i+1:02d}"
     cat = asc_categories[i]
     los_observed = make_interferogram(day0, day1, ASC_INCIDENCE_DEG, ASC_HEADING_DEG, cat)
-    for j in range(N_POINTS):
+    for j in draw_decorrelation_mask():
         records.append({
             "interferogram_id": ifg_id, "point_id": j,
             "x_m": round(x_pts[j], 2), "y_m": round(y_pts[j], 2),
@@ -412,7 +462,7 @@ for i, (day0, day1) in enumerate(desc_pairs):
     ifg_id = f"DESC-{i+1:02d}"
     cat = desc_categories[i]
     los_observed = make_interferogram(day0, day1, DESC_INCIDENCE_DEG, DESC_HEADING_DEG, cat)
-    for j in range(N_POINTS):
+    for j in draw_decorrelation_mask():
         records.append({
             "interferogram_id": ifg_id, "point_id": j,
             "x_m": round(x_pts[j], 2), "y_m": round(y_pts[j], 2),
