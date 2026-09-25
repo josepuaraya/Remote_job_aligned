@@ -1,7 +1,7 @@
 """
 solve.py -- reference solution for the insar-volcano-inversion task (v5).
 
-v5 change (see process.md): the InSAR atmospheric noise and the GNSS
+v5 change: the InSAR atmospheric noise and the GNSS
 common-mode error are now genuinely correlated (spatial for InSAR,
 cross-station for GNSS), not i.i.d. A correct inversion estimates both
 covariance structures from the visible data and uses them to weight a

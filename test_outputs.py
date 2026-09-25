@@ -26,7 +26,7 @@ now genuinely correlated (see generate_insar_data.py/solve.py), and the
 agent must report its own estimate of both covariance structures
 (insar_covariance_estimate, gnss_covariance_estimate). These are graded
 loosely and deliberately: calibration against the reference solution
-(see process.md) showed that a short-lag semivariogram fit to this
+showed that a short-lag semivariogram fit to this
 amount of data is only weakly identified (the fitted correlation length
 tracks the optimizer's starting guess across a wide range, a known
 geostatistics identifiability issue, not a defect in a particular
@@ -66,9 +66,9 @@ REQUIRED_KEYS = {
 ALL_IDS = {f"ASC-{i:02d}" for i in range(1, 11)} | {f"DESC-{i:02d}" for i in range(1, 11)}
 
 # Tolerances -- calibrated against 3 independent noise realizations of the
-# author's own reference solution (see process.md for the calibration log).
-# This task is genuinely harder than an earlier design iteration (see
-# process.md): the joint fit combines many interferograms of varying
+# author's own reference solution.
+# This task is genuinely harder than an earlier design iteration: the
+# joint fit combines many interferograms of varying
 # duration (including one spanning a real ~70-day acquisition gap), and
 # the formal (delta-method) uncertainty was found to underestimate the
 # true error, requiring an empirically calibrated safety margin -- the
@@ -87,7 +87,7 @@ MAX_EXCLUDED_COUNT = 10            # observed exactly 6 (perfect match) across 3
 #   without ever deriving it from its own fitted source (e.g. copying the
 #   observed GPS record, or leaving a stale value from an InSAR-only fit).
 # - Accuracy against the true record is a secondary backstop, deliberately
-#   loose: calibrated runs (see process.md) show reasonable joint
+#   loose: calibrated runs show reasonable joint
 #   InSAR+GPS weighting choices land in the ~0.2-1.3cm range on the
 #   shipped dataset, while ignoring GPS entirely lands at ~1.5-4cm
 #   depending on noise realization. A tight cm-level cutoff here would
@@ -292,8 +292,8 @@ def test_gps_prediction_matches_true_record(submitted, answer_key):
     """The submitted source must reconcile with the independent GPS
     station -- but this is a generous backstop (5cm), not a tight check,
     despite the GPS station's own measurement noise being small (mm-level)
-    and uncorrelated with the InSAR atmospheric noise. Calibration (see
-    process.md) found the depth/volume trade-off this targets is real but
+    and uncorrelated with the InSAR atmospheric noise. Calibration found
+    the depth/volume trade-off this targets is real but
     modest, and itself sensitive to legitimate differences in how an
     agent weights the GPS record against the InSAR data -- a tight
     cm-level cutoff would risk failing a genuinely correct joint

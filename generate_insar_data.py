@@ -8,7 +8,7 @@ runtime; included for reviewer traceability.
 True source: a Mogi (1958) point source at x0=0, y0=0, depth=4500 m, with
 onset at day 60 and a LINEAR (constant-rate) post-onset inflation profile.
 
-v5 change (see process.md): the InSAR atmospheric noise and the GNSS
+v5 change: the InSAR atmospheric noise and the GNSS
 common-mode error are now genuinely spatially/cross-station correlated
 (drawn from an actual covariance model), not just independent per-point
 draws. A correct inversion should estimate that covariance structure from
