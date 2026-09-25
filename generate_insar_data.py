@@ -1,6 +1,20 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v5).
+insar-volcano-inversion task (v7).
+
+v7 change: the "unrepairable" category's noise is now a genuinely rough,
+short-correlation-length random field instead of a smooth deterministic
+trend. Real diagnostic evidence (an actual agent run) showed the previous
+smooth-trend version was, in fact, repairable: a general trend-surface
+correction (elevation term plus a smooth 2D surface per interferogram)
+brought its residuals below threshold just as reliably as the genuinely
+repairable category, defeating the intended exclusion requirement with a
+legitimate, defensible method. A smooth field is exactly what a
+trend-surface fit is designed to remove -- it does not represent noise
+that resists repair. Genuine turbulent atmospheric noise has real power
+at short spatial scales that a smooth correction cannot capture without
+also removing real deformation signal; that is what actually makes it
+unrepairable, and what this version now models.
 
 AUTHOR'S PROVENANCE SCRIPT. Not executed by solve.py/test_outputs.py at
 runtime; included for reviewer traceability.
@@ -50,9 +64,10 @@ Noise model, 6/8/6 split across the 20 interferograms:
   correlated with topography), correctable via a phase-vs-elevation
   regression.
 - 6 "unrepairable": spatially correlated baseline noise PLUS a
-  large-amplitude smooth 2D field NOT correlated with elevation
-  (simulating turbulent atmospheric noise with no simple correctable
-  structure) -- must be excluded.
+  large-amplitude, SHORT-correlation-length rough field NOT correlated
+  with elevation (simulating turbulent atmospheric noise whose spatial
+  frequency content resists any smooth/low-order correction) -- must be
+  excluded.
 
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
@@ -132,6 +147,24 @@ _SPATIAL_CHOL = _build_spatial_cholesky(x_pts, y_pts, INSAR_CORR_SIGMA_M, INSAR_
 def draw_correlated_insar_field():
     z = RNG.standard_normal(N_POINTS)
     return _SPATIAL_CHOL @ z
+
+
+# Unrepairable turbulent noise: genuinely rough (short correlation length,
+# much shorter than the baseline field's), not a smooth deterministic trend.
+# A smooth low-order trend (an orbital-ramp-like field) is exactly what a
+# general trend-surface correction is designed to remove, so it does not
+# represent noise that resists repair -- it is realistic turbulent
+# atmospheric noise, which has real power at short spatial scales, that
+# genuinely cannot be captured by any reasonable smooth correction without
+# also removing real deformation signal.
+UNREPAIRABLE_CORR_LENGTH_M = 120.0
+_UNREPAIRABLE_CHOL = _build_spatial_cholesky(x_pts, y_pts, 1.0, UNREPAIRABLE_CORR_LENGTH_M)
+
+
+def draw_rough_unrepairable_field():
+    z = RNG.standard_normal(N_POINTS)
+    field = _UNREPAIRABLE_CHOL @ z
+    return field / np.std(field)  # unit marginal sigma, scaled by caller
 
 
 def mogi_displacement(x, y, depth, delta_v_m3, x0=0.0, y0=0.0, nu=POISSON_RATIO):
@@ -219,10 +252,8 @@ def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
         turbulent_overlay = raw_field * RNG.choice([-1, 1])
         noise = noise + elevation_term + turbulent_overlay
     elif category == "unrepairable":
-        raw_field = x_pts - 0.5 * y_pts + 0.4 * (x_pts * y_pts / DOMAIN_HALF_WIDTH_M)
-        raw_field = raw_field - np.mean(raw_field)
-        raw_field = raw_field / np.std(raw_field) * UNREPAIRABLE_NOISE_SIGMA_M
-        noise = noise + raw_field * RNG.choice([-1, 1])
+        rough_field = draw_rough_unrepairable_field() * UNREPAIRABLE_NOISE_SIGMA_M
+        noise = noise + rough_field
     elif category == "unwrap_jump":
         jump_sign = RNG.choice([-1, 1])
         jump = np.where(x_pts > _unwrap_jump_boundary_x, UNWRAP_JUMP_SIZE_M * jump_sign, 0.0)
