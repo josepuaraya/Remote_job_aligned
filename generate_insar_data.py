@@ -1,6 +1,31 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v9).
+insar-volcano-inversion task (v10).
+
+v10 change: real trajectory-review evidence (v9) showed Claude still
+clearing the task cleanly (0 genuine failures of 4), and revealed a
+second, independent problem with the v8 discrete-defect check: two
+separate real trajectory runs now show a competent agent (Codex)
+correctly diagnosing the jump defects as processing artifacts and still
+choosing to exclude them, landing within ~1% of the true answer anyway --
+because with 20 total interferograms there was enough redundant data that
+losing a few to a conservative QC choice barely dented the final answer
+for a reasonably competent method, not just this task's own reference
+implementation. Rather than adding another isolated noise-parameter
+tweak, this reduces the data volume itself: 11 total interferograms (6
+ascending, 5 descending -- deliberately asymmetric, so an agent cannot
+assume the tracks mirror each other), down from 20, with category counts
+scaled proportionally (3 clean / 3 repairable / 3 unrepairable / 2
+unwrap_jump). Validated across 5 calibration seeds: the reference
+solution still correctly excludes the true-unrepairable set and correctly
+repairs-and-uses both jump interferograms every time, with real margin on
+every existing tolerance. The exclude-vs-repair cost at this data volume
+alone is not yet decisively larger or more consistent than before (this
+is being investigated further, e.g. adding per-interferogram decorrelated
+points, before relying on it as a difficulty lever on its own) -- but the
+structural reduction is validated and shipped now so it can be tested
+against real agents directly, per the author's request, rather than
+iterating further in isolation first.
 
 v9 change: real trajectory-review evidence (v8) showed Claude clearing the
 task too easily (0-1 genuine failures of 4 trials; the difficulty gate
@@ -84,32 +109,34 @@ count suggests.
   (a standard real GNSS network effect -- e.g. reference-frame or orbit
   error -- normally removed by common-mode stacking across the network).
 
-20 interferograms: 10 ascending, 10 descending, each track formed from
-11 independently-scheduled acquisition dates (~monthly spacing, offset
-between tracks) as 10 sequential interferograms -- a realistic SBAS-style
-stack, not a dense continuous time series.
+11 interferograms: 6 ascending, 5 descending, deliberately asymmetric
+between tracks. Ascending keeps a varying-duration structure including a
+genuine ~70-day gap with no coverage at all; descending is evenly
+sampled with no such gap, so an agent cannot assume the two tracks are
+structurally alike -- a realistic SBAS-style stack, not a dense
+continuous time series.
 
 Ascending geometry: incidence=39.1054 deg, heading=-11.876832 deg.
 Descending geometry: incidence=39.1840 deg, heading=-168.27934 deg.
 (Real geometry values from the author's own prior fieldwork in Iceland.)
 
-Noise model, 5/6/6/3 split across the 20 interferograms:
-- 5 "clean": spatially correlated baseline noise only.
-- 6 "repairable": spatially correlated baseline noise PLUS an
+Noise model, 3/3/3/2 split across the 11 interferograms:
+- 3 "clean": spatially correlated baseline noise only.
+- 3 "repairable": spatially correlated baseline noise PLUS an
   elevation-correlated linear term (simulating tropospheric delay
   correlated with topography), correctable via a phase-vs-elevation
   regression.
-- 6 "unrepairable": spatially correlated baseline noise PLUS a
+- 3 "unrepairable": spatially correlated baseline noise PLUS a
   large-amplitude, SHORT-correlation-length rough field NOT correlated
   with elevation (simulating turbulent atmospheric noise whose spatial
   frequency content resists any smooth/low-order correction) -- must be
   excluded.
-- 3 "unwrap_jump": spatially correlated baseline noise PLUS a discrete
+- 2 "unwrap_jump": spatially correlated baseline noise PLUS a discrete
   offset affecting only part of the footprint (an unwrapping-style
-  defect), fixed to substantially post-onset windows -- a different
-  failure mode from atmospheric noise, correctable by detecting and
-  removing the discrete offset, and must be repaired and kept rather
-  than excluded.
+  defect), one per track, each fixed to a substantially post-onset
+  window -- a different failure mode from atmospheric noise, correctable
+  by detecting and removing the discrete offset, and must be repaired
+  and kept rather than excluded.
 
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
@@ -241,17 +268,23 @@ def los_projection_reduced(u_e, u_u, incidence_deg, heading_deg):
 
 
 # ---------------------------------------------------------------------------
-# Build acquisition date lists (independent per track)
+# Build acquisition date lists (independent per track). Deliberately
+# asymmetric between tracks, and deliberately fewer than earlier versions:
+# with 20 total interferograms there was enough redundant data that losing
+# a handful to a QC mistake barely dented the final answer for a
+# reasonably competent method, not just this task's own reference
+# implementation -- real trajectory evidence confirmed this directly.
+# Ascending keeps the varying-duration structure (including the genuine
+# 70-day gap); descending is evenly sampled with no such gap, so an agent
+# cannot assume symmetry between the two tracks.
 # ---------------------------------------------------------------------------
 asc_dates = np.concatenate([
-    np.linspace(0, 140, 6), np.linspace(210, N_DAYS - 1, 5)
-]).astype(int)  # 70-day gap (140-210), 11 dates -> 10 interferograms
-desc_dates = np.concatenate([
-    np.linspace(6, 146, 6), np.linspace(216, N_DAYS - 7, 5)
-]).astype(int)  # own 70-day gap (146-216), offset from ascending's
+    np.linspace(0, 140, 4), np.linspace(210, N_DAYS - 1, 3)
+]).astype(int)  # 70-day gap (140-210), 7 dates -> 6 interferograms
+desc_dates = np.linspace(6, N_DAYS - 7, 6).astype(int)  # evenly sampled, 6 dates -> 5 interferograms, no gap
 
-asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(10)]
-desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
+asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(len(asc_dates) - 1)]
+desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(len(desc_dates) - 1)]
 
 # The discrete unwrapping-jump defect is deliberately NOT placed by the
 # random shuffle below, and there are deliberately three of them, not one.
@@ -271,18 +304,21 @@ desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(10)]
 # of repairing them makes the reported volume change meaningfully worse
 # on the large majority of seeds (depth is a bit more mixed, consistent
 # with this task's already-acknowledged depth/volume trade-off).
-# Deliberately avoids the 70-day-gap-spanning interferograms (slot index
-# 5 on each track) -- those windows already carry their own, separate
+# Deliberately avoids the 70-day-gap-spanning ascending interferogram
+# (slot index 3) -- that window already carries its own, separate
 # difficulty (proportionally more information about the unobserved gap),
-# and stacking the jump defect onto them too would conflate two distinct
-# scientific judgment calls into the same interferogram.
-UNWRAP_JUMP_ASC_SLOTS = [3, 7]
-UNWRAP_JUMP_DESC_SLOTS = [7]
+# and stacking the jump defect onto it too would conflate two distinct
+# scientific judgment calls into the same interferogram. One jump
+# interferogram per track (not concentrated on one track), each on a
+# substantially post-onset window: ascending slot 4 (day 210-287) and
+# descending slot 2 (day ~147-217).
+UNWRAP_JUMP_ASC_SLOTS = [4]
+UNWRAP_JUMP_DESC_SLOTS = [2]
 
-categories = ["clean"] * 5 + ["repairable"] * 6 + ["unrepairable"] * 6
+categories = ["clean"] * 3 + ["repairable"] * 3 + ["unrepairable"] * 3
 RNG.shuffle(categories)
-asc_categories = categories[:8]
-desc_categories = categories[8:]
+asc_categories = categories[:5]
+desc_categories = categories[5:]
 for slot in UNWRAP_JUMP_ASC_SLOTS:
     asc_categories.insert(slot, "unwrap_jump")
 for slot in UNWRAP_JUMP_DESC_SLOTS:
