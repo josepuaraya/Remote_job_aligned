@@ -1,6 +1,27 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v12).
+insar-volcano-inversion task (v14).
+
+v14 change: added a second topographic high, well away from the true
+source, with the same smooth, radially-symmetric shape as the original
+near-source peak (ELEV_PEAK2_X_M/ELEV_PEAK2_Y_M below). The original
+near-source peak is unchanged, so the existing "don't auto-correct
+elevation near the source without checking the residual" lesson still
+applies exactly as before. The new peak tests the same judgment call
+applied uniformly: the gating logic (correct only when it demonstrably
+reduces residual) has no spatial awareness of where the correlation comes
+from and already handles both peaks correctly without modification, but
+an agent that reasons about elevation correlation only near the obvious
+source and treats the far peak's correlated residual as ordinary noise is
+making the same mistake, just somewhere else. Validated across 5
+calibration seeds: the properly-gated pipeline is unaffected (worst-case
+loc/depth/vol error ~42.5m/0.82%/3.12%, still comfortably inside
+tolerance), while a naive method that applies the elevation correction
+automatically everywhere -- without gating it against the fitted model's
+residual -- degrades substantially more with both peaks present than with
+one (worst-case volume error rose from ~2.4% to ~13.2%, worst-case
+location error from ~79m to ~225m, actually failing tolerance outright on
+one of the five seeds).
 
 v12 change: real trajectory-review evidence (v11) showed Claude still
 clearing the task cleanly (0 genuine failures of 4), correctly repairing
@@ -266,7 +287,25 @@ PEAK_ELEV_M = 1500.0
 DECAY_LENGTH_M = 1500.0
 BASE_ELEV_M = 200.0
 r_from_elev_peak = np.sqrt((x_pts - ELEV_PEAK_X_M)**2 + (y_pts - ELEV_PEAK_Y_M)**2)
-elevation_pts = PEAK_ELEV_M * np.exp(-r_from_elev_peak / DECAY_LENGTH_M) + BASE_ELEV_M
+
+# A second, independent topographic high, well away from the true source.
+# Its shape (smooth, radially-symmetric, single-peaked) is deliberately
+# indistinguishable from the near-source peak above -- an agent that only
+# expects elevation correlation to matter close to the source can mistake
+# this decoy's correlated signal for genuine noise-only topography and skip
+# the same residual-gated correction reasoning it (correctly) applies near
+# the source.
+ELEV_PEAK2_X_M = 2200.0
+ELEV_PEAK2_Y_M = -2000.0
+PEAK2_ELEV_M = 1200.0
+DECAY2_LENGTH_M = 1300.0
+r_from_elev_peak2 = np.sqrt((x_pts - ELEV_PEAK2_X_M)**2 + (y_pts - ELEV_PEAK2_Y_M)**2)
+
+elevation_pts = (
+    PEAK_ELEV_M * np.exp(-r_from_elev_peak / DECAY_LENGTH_M)
+    + PEAK2_ELEV_M * np.exp(-r_from_elev_peak2 / DECAY2_LENGTH_M)
+    + BASE_ELEV_M
+)
 
 # ---------------------------------------------------------------------------
 # Spatially correlated InSAR baseline noise: exponential covariance kernel,
@@ -409,6 +448,15 @@ for slot in UNWRAP_JUMP_DESC_SLOTS:
 # applies the elevation regression automatically, without checking that it
 # actually reduces the residual against the fitted model, removes real
 # signal along with the atmospheric term, not just a theoretical risk.
+# A second topographic high (ELEV_PEAK2_X_M, ELEV_PEAK2_Y_M) sits far from
+# the source, with the same smooth, radially-symmetric shape as the
+# near-source peak -- real terrain has more than one high point, and there
+# is no reason elevation-correlated noise would only appear where an agent
+# happens to be looking for it. The same gated logic (correct only when it
+# demonstrably helps the fit) applies uniformly across the whole footprint;
+# an agent that reasons about elevation correlation only near the source
+# and treats the far peak's correlated residual as unstructured noise is
+# making the same mistake the gating exists to prevent, just somewhere else.
 # The coefficient magnitude below is calibrated (swept and validated across
 # 5 seeds) to a level where a correctly-gated correction still comfortably
 # recovers the source (well within tolerance, with real margin on the
