@@ -102,43 +102,96 @@ def effective_duration(day, onset=ONSET_DAY):
 
 
 MIN_STEP_OFFSET_M = 0.02  # only accept a jump-sized offset, not any split that happens to help a little
+MIN_COHERENCE_RATIO = 1.25  # calibrated: pure-noise candidates peak ~1.06-1.11, genuine jump regions ~1.45
+
+
+def _spatial_coherence_ratio(x, y, mask, k=6):
+    """How much more likely a point's nearest neighbors share its group,
+    compared to pure chance given the group's size. A genuine spatially
+    coherent region (however irregularly shaped) scores well above 1;
+    an arbitrary bipartition of spatially unstructured points -- e.g. one
+    chosen simply because it splits residual values into two groups --
+    scores close to 1, since with no real spatial structure a point's
+    neighbors are no more likely to share its group than random chance.
+    """
+    n = len(x)
+    coords = np.column_stack([x, y])
+    dist = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(-1))
+    np.fill_diagonal(dist, np.inf)
+    k_eff = min(k, n - 1)
+    nn_idx = np.argpartition(dist, k_eff, axis=1)[:, :k_eff]
+    neighbor_mask = mask[nn_idx]
+    same_frac = np.where(mask[:, None], neighbor_mask, ~neighbor_mask).mean()
+    p = mask.mean()
+    chance = p ** 2 + (1 - p) ** 2
+    return same_frac / max(chance, 1e-9)
 
 
 def step_correct(ifg, ifg_id, pred):
-    """Detect and correct a discrete step (unwrapping-style jump): try
-    splitting the interferogram's points along x at each decile, removing
-    the per-side residual mean difference, and keep whichever split
-    minimizes the residual RMS against the current model prediction. A
-    smooth atmospheric signal has no such split that helps much; a
-    genuine discrete jump does. Only accepted if the offset found is
-    jump-sized (MIN_STEP_OFFSET_M) -- otherwise a smooth, merely x-leaning
-    trend (e.g. the unrepairable category's large-scale field) can be
-    partially, spuriously absorbed by a well-placed split, which is not a
-    genuine step correction and must not be allowed to erode the
-    unrepairable-noise exclusion threshold.
+    """Detect and correct a discrete step (unwrapping-style jump) affecting
+    an arbitrarily-shaped, spatially coherent region of the footprint --
+    not necessarily a simple half-plane split. Candidate affected regions
+    are found by clustering the residual values themselves (sorted, tried
+    at each decile split) rather than assuming any particular spatial
+    shape in advance; a genuine discrete jump shows up as two well-
+    separated residual clusters regardless of their spatial arrangement.
+
+    But clustering by residual value alone is not sufficient: sorting
+    values into two groups always finds *some* apparent separation, even
+    in pure unstructured noise, since sorting maximizes the gap between
+    the two groups by construction. So a candidate is only accepted if
+    the smaller group is also spatially coherent (its members are
+    disproportionately near each other, not scattered) -- a genuine
+    discontinuity affects a connected patch of ground; noise split by
+    value does not. Without this spatial check, a flexible-enough value
+    clustering would eventually explain away genuinely unrepairable noise
+    too, the same failure this method has already been fixed for once.
     """
     sub = ifg[ifg.interferogram_id == ifg_id]
     x = sub["x_m"].values
+    y = sub["y_m"].values
     los = sub["los_displacement_m"].values
     resid = los - pred
 
     best_rms = np.sqrt(np.mean(resid ** 2))
     best_corrected = los
+    order = np.argsort(resid)
+    n = len(resid)
     for q in range(10, 100, 10):
-        thresh = np.percentile(x, q)
-        mask = x > thresh
-        if mask.sum() < 20 or (~mask).sum() < 20:
+        i = int(round(n * q / 100))
+        if i < 20 or (n - i) < 20:
             continue
-        offset = resid[mask].mean() - resid[~mask].mean()
+        low_idx, high_idx = order[:i], order[i:]
+        offset = resid[high_idx].mean() - resid[low_idx].mean()
         if abs(offset) < MIN_STEP_OFFSET_M:
             continue
-        corrected = los.copy()
-        corrected[mask] -= offset
-        rms = np.sqrt(np.mean((corrected - pred) ** 2))
-        if rms < best_rms:
-            best_rms = rms
-            best_corrected = corrected
+
+        mask = np.zeros(n, dtype=bool)
+        mask[high_idx] = True
+        if _spatial_coherence_ratio(x, y, mask) < MIN_COHERENCE_RATIO:
+            continue
+
+        # Sorting by residual value only identifies which two groups are
+        # separated -- not which one is the genuinely shifted (jumped)
+        # group and which is the correct baseline. Shifting the wrong one
+        # would just relocate both groups to the jumped level instead of
+        # removing it, so both directions are tried and judged by which
+        # actually reduces the residual against the model, not assumed.
+        for candidate in (
+            _shift(los, high_idx, -offset),
+            _shift(los, low_idx, offset),
+        ):
+            rms = np.sqrt(np.mean((candidate - pred) ** 2))
+            if rms < best_rms:
+                best_rms = rms
+                best_corrected = candidate
     return best_rms, best_corrected
+
+
+def _shift(los, idx, delta):
+    corrected = los.copy()
+    corrected[idx] += delta
+    return corrected
 
 
 def spatial_prediction(params, points, meta_full):

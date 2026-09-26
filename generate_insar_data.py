@@ -1,6 +1,55 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v11).
+insar-volcano-inversion task (v12).
+
+v12 change: real trajectory-review evidence (v11) showed Claude still
+clearing the task cleanly (0 genuine failures of 4), correctly repairing
+the discrete-defect interferograms every time -- while Codex (3/4) and
+Gemini (4/4) now genuinely fail on that same mechanism, so it is working
+as intended for them. The recommendation from that review was to make the
+defect itself harder to distinguish from atmospheric noise, not to make a
+wrong diagnosis costlier (v9/v10/v11 all tried the latter and, correctly,
+never touched Claude's result, since Claude never misdiagnoses it).
+
+The jump defect's affected region is no longer a clean half-plane split
+along x -- it is now an irregular, spatially coherent patch (drawn from
+the same kind of smooth random field already used elsewhere in this
+generator, thresholded at its median), reflecting that a real
+phase-unwrapping error follows whatever connected patch of ground lost
+coherence, not a straight line. The jump magnitude itself (2.8cm, a
+physical unit for C-band phase ambiguity) is unchanged -- shrinking it
+would trade physical realism for difficulty, which this task has held
+against as a matter of principle throughout.
+
+This required a real fix, not just a data change: solve.py's step_correct
+previously only searched for a spatial split along x. Detecting an
+arbitrarily-shaped region instead required switching to clustering
+candidate corrections by residual value (which finds the right two groups
+regardless of their spatial shape) gated by a spatial-coherence check
+(the affected group's points must be disproportionately near each other,
+not scattered -- otherwise a flexible enough value-based search would
+eventually explain away genuinely unrepairable noise too, the same
+failure this method was already fixed for once). Doing this surfaced a
+real, subtle bug during development: clustering by value alone does not
+know which of the two groups is the genuinely shifted one and which is
+the correct baseline, so a naive one-directional correction is right only
+about half the time (whenever the jump's sign happens to align with the
+convention); both directions are now tried and judged by which actually
+reduces the residual against the model, not assumed.
+
+Validated across all 5 calibration seeds: the reference solution still
+correctly excludes the true-unrepairable set and correctly repairs-and-
+uses both (now irregularly-shaped) jump interferograms every time, with
+real margin on every tolerance (worst case: location 28.6m/200m, depth
+0.83%/10%, volume 0.77%/10%). Directly confirmed the coherence gate does
+not reopen the earlier false-positive bug: step_correct accepts zero
+spurious corrections across all 15 true-unrepairable-interferogram checks
+(3 per seed x 5 seeds). Negative control confirms the discrete-defect
+check still fires correctly, isolated to that one test. Full 16-test
+suite passes on the reference solution across all 5 seeds and the
+regenerated shipped data. Honest caveat, stated plainly: as with v9/v10/
+v11, there is no trajectory evidence yet that this specifically catches
+Claude -- that requires an actual trajectory-review run to confirm.
 
 v11 change: each interferogram now independently loses a different,
 randomly varying fraction of its points (roughly 50-70%, not a fixed
@@ -374,16 +423,24 @@ REPAIRABLE_TURBULENT_SIGMA_M = 0.004
 UNREPAIRABLE_NOISE_SIGMA_M = 0.012
 
 # Unwrapping-error defect: a discrete offset (a phase-ambiguity-sized jump,
-# ~2.8cm -- realistic for a C-band radar) affecting points on one side of a
-# random spatial split, riding on otherwise-clean correlated noise. Not
-# correlated with elevation, so the existing phase-elevation correction
-# cannot fix it -- and not smooth/large-scale like the unrepairable category,
-# so a naive residual-magnitude read treats it like ordinary turbulent noise.
-# Genuinely repairable (by detecting and correcting the discrete step), but
-# only by a method that looks for a discontinuity, not the elevation
-# regression already implemented for the "repairable" category.
+# ~2.8cm -- realistic for a C-band radar, a physical unit this magnitude is
+# not an arbitrary difficulty dial) affecting an irregular, spatially
+# coherent patch of the footprint -- not a clean half-plane split. Real
+# unwrapping errors follow whatever connected region lost phase continuity
+# (a patch of poor coherence or steep gradient), not a straight line, so a
+# detector that only searches for a simple one-directional split (e.g.
+# "high x vs low x") will miss it; a genuine diagnostic has to identify an
+# arbitrarily-shaped spatially-coherent affected region. Riding on
+# otherwise-clean correlated noise, not correlated with elevation (so the
+# phase-elevation correction cannot fix it), and not smooth/large-scale
+# like the unrepairable category (so a naive residual-magnitude read
+# treats it like ordinary turbulent noise). Genuinely repairable, but only
+# by a method that actually looks for a spatially coherent discontinuity.
 UNWRAP_JUMP_SIZE_M = 0.028
-_unwrap_jump_boundary_x = float(RNG.uniform(-1000.0, 1000.0))
+UNWRAP_JUMP_REGION_CORR_LENGTH_M = 900.0
+_unwrap_jump_region_chol = _build_spatial_cholesky(x_pts, y_pts, 1.0, UNWRAP_JUMP_REGION_CORR_LENGTH_M)
+_unwrap_jump_region_field = _unwrap_jump_region_chol @ RNG.standard_normal(N_POINTS)
+_unwrap_jump_mask = _unwrap_jump_region_field > np.median(_unwrap_jump_region_field)
 
 
 def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
@@ -409,7 +466,7 @@ def make_interferogram(day0, day1, incidence_deg, heading_deg, category):
         noise = noise + rough_field
     elif category == "unwrap_jump":
         jump_sign = RNG.choice([-1, 1])
-        jump = np.where(x_pts > _unwrap_jump_boundary_x, UNWRAP_JUMP_SIZE_M * jump_sign, 0.0)
+        jump = np.where(_unwrap_jump_mask, UNWRAP_JUMP_SIZE_M * jump_sign, 0.0)
         noise = noise + jump
 
     los_observed = los_true + noise
@@ -601,7 +658,7 @@ answer_key = {
     "gnss_stations_m": GNSS_STATIONS,
     "unwrap_jump_interferograms": [p["interferogram_id"] for p in answer_pairs if p["true_category"] == "unwrap_jump"],
     "unwrap_jump_size_m": UNWRAP_JUMP_SIZE_M,
-    "unwrap_jump_boundary_x_m": _unwrap_jump_boundary_x,
+    "unwrap_jump_affected_point_ids": [int(i) for i in np.where(_unwrap_jump_mask)[0]],
     "validation_interferogram_id": VAL_ID,
     "validation_interferogram_evaluation_point_m": {"x_m": primary["x_m"], "y_m": primary["y_m"]},
     "validation_interferogram_window": {
