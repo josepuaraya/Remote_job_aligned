@@ -3,7 +3,8 @@
   "requirements": [
     "pytest==8.4.1",
     "pytest-json-ctrf==0.3.5",
-    "numpy==2.2.6"
+    "numpy==2.2.6",
+    "scipy==1.16.3"
   ],
   "target": {
     "abi": "cp312",
@@ -39,6 +40,10 @@
     {
       "name": "numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
       "sha256": "fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249"
+    },
+    {
+      "name": "scipy-1.16.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "72d1717fd3b5e6ec747327ce9bda32d5463f472c9dce9f54499e81fbd50245a1"
     }
   ]
 }

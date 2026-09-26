@@ -21,28 +21,31 @@ Pipeline
    that track's own first epoch. Interferogram weights are estimated from
    the data itself (variance-component estimation from an initial
    equal-weighted inversion's residuals), not assumed.
-4. Each track's per-epoch field is interpolated (inverse-distance,
-   nearest points) onto the GNSS station coordinates, then the two
-   tracks are combined (assuming negligible north-south sensitivity,
-   consistent with the near-polar look geometry) into an InSAR-derived
-   vertical displacement time series at each station.
-5. Because InSAR is only ever a relative measurement, each station's own
-   InSAR-vs-GNSS residual is regressed against time; a station whose
-   residual carries a statistically significant trend is not explained
-   by a simple reference-frame offset (it is behaving like an
-   independent, non-volcanic local process) and is excluded before the
-   next step. The remaining stations' residual offsets are fit with a
-   planar ramp a + b*x + c*y (the InSAR reference-frame/orbital term),
-   which is then removed from the InSAR field everywhere.
-6. At the primary near-source station, the GNSS record and the corrected
-   InSAR-derived vertical series are combined and fit with a two-segment
-   (unknown breakpoint) linear model via grid search + weighted least
-   squares, giving the rate before/after the change and the change day.
-   The same combined-series approach at a designated far-field station
-   gives the control-zone check. 95% CIs come from a parametric
-   bootstrap using each source's own estimated noise.
-7. A final InSAR-vs-GNSS RMSE (post-correction, at the retained stations)
-   is reported as the reconciliation check.
+4. GNSS is the only absolute-reference dataset here, so InSAR is tied to
+   it in InSAR's OWN native domain, per track, not after decomposing to
+   vertical: each GNSS station's own (E, N, U) record is projected into
+   EACH track's LOS geometry separately (a station has one predicted LOS
+   value per track), and compared against that track's raw interpolated
+   LOS at the station. A station is excluded only when BOTH tracks'
+   independent residual trends agree it is significant and large (a real
+   local process shows up in both geometries; track-specific
+   reconstruction noise generally does not). The remaining stations'
+   residual offsets are fit with a separate planar ramp a + b*x + c*y per
+   track (each track has its own independent reference-frame/orbital
+   error) and removed from that track's LOS field everywhere -- only then
+   are the two tracks decomposed into vertical/east-west.
+5. A joint nonlinear inversion (GNSS, weighted by each station's own
+   reported uncertainty, plus a near-source sample of the now-corrected
+   InSAR LOS pixels from both tracks) fits a single McTigue (1987) finite
+   spherical source -- location, depth, radius, and a two-segment
+   (unknown breakpoint) volume-rate history -- rather than treating any
+   one station as "the" answer. A noisy-but-unbiased station is
+   down-weighted by its own disclosed sigma, not excluded; only a station
+   whose error is NOT explained by its own reported uncertainty (step 4)
+   is dropped. 95% CIs use the delta method from the fit's Jacobian.
+6. The fitted source's predicted vertical rate/displacement at the
+   primary and control stations, and a final InSAR-vs-GNSS LOS RMSE at
+   the retained stations, are reported as the reconciliation checks.
 """
 from __future__ import annotations
 
@@ -52,17 +55,18 @@ import os
 from collections import defaultdict
 
 import numpy as np
+from scipy.optimize import least_squares
 
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace")
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(WORKSPACE_DIR, "data"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(WORKSPACE_DIR, "output"))
 
-RNG = np.random.default_rng(4242)
-
 AMBIGUITY_QUANTUM_M = 0.028  # disclosed SAR system constant (half-wavelength)
 PRIMARY_STATION_ID = "GNSS-01"
 CONTROL_STATION_ID = "GNSS-07"
-N_BOOTSTRAP = 300
+POISSON_RATIO = 0.25
+INSAR_NEAR_FIELD_RADIUS_M = 4000.0
+INSAR_MAX_POINTS_PER_TRACK = 90
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +93,29 @@ def los_projection_full(u_e, u_n, u_u, incidence_deg, heading_deg):
         - np.sin(theta) * np.sin(alpha) * u_n
         - np.cos(theta) * u_u
     )
+
+
+def mctigue_displacement(x, y, depth, delta_v_m3, radius, x0, y0, nu=POISSON_RATIO):
+    """McTigue (1987) finite spherical source. Reduces exactly to the Mogi
+    point-source result as radius -> 0 (dV = pi*radius**3*(dP/mu), the
+    standard pressure/volume relation for a pressurized sphere), which is
+    both a physical sanity check and why a Mogi-only fit systematically
+    misses near-field displacement for a source whose radius is not
+    negligible relative to its depth."""
+    dx, dy = x - x0, y - y0
+    rho = np.sqrt(dx ** 2 + dy ** 2)
+    R = np.sqrt(rho ** 2 + depth ** 2)
+    dP_mu = delta_v_m3 / (np.pi * radius ** 3)
+    a_d = radius / depth
+    f1 = (depth ** 3) / (R ** 3)
+    c1 = a_d ** 3 / (7.0 - 5.0 * nu)
+    uzbar = a_d ** 3 * (1 - nu) * f1 * (1 - c1 * (0.5 * (1 + nu) - 3.75 * (2 - nu) * f1))
+    u_z = uzbar * dP_mu * depth
+    u_r = u_z * (rho / depth)
+    theta_ang = np.arctan2(dy, dx)
+    u_x = u_r * np.cos(theta_ang)
+    u_y = u_r * np.sin(theta_ang)
+    return u_x, u_y, u_z
 
 
 # ---------------------------------------------------------------------------
@@ -413,35 +440,6 @@ def local_linear_interpolate(track, cum, query_x, query_y, k=18):
     return out
 
 
-def decompose_vertical_eastwest(asc_track, asc_at_station, desc_track, desc_at_station, common_days):
-    """Linear-interpolate each track's per-epoch series onto common_days, then
-    solve the 2x2 LOS system (ignoring north) for (east_west, vertical)."""
-    theta_a, alpha_a = np.radians(asc_track.incidence_deg), np.radians(asc_track.heading_deg)
-    theta_d, alpha_d = np.radians(desc_track.incidence_deg), np.radians(desc_track.heading_deg)
-    A1, C1 = np.sin(theta_a) * np.cos(alpha_a), np.cos(theta_a)
-    A2, C2 = np.sin(theta_d) * np.cos(alpha_d), np.cos(theta_d)
-    det = A1 * (-C2) - A2 * (-C1)
-
-    asc_days = np.array(asc_track.epoch_days, dtype=float)
-    desc_days = np.array(desc_track.epoch_days, dtype=float)
-    valid_asc = ~np.isnan(asc_at_station)
-    valid_desc = ~np.isnan(desc_at_station)
-
-    lo = max(asc_days[valid_asc].min() if valid_asc.any() else np.inf,
-             desc_days[valid_desc].min() if valid_desc.any() else np.inf)
-    hi = min(asc_days[valid_asc].max() if valid_asc.any() else -np.inf,
-             desc_days[valid_desc].max() if valid_desc.any() else -np.inf)
-    days = np.array([d for d in common_days if lo <= d <= hi], dtype=float)
-    if len(days) == 0:
-        return np.array([]), np.array([]), np.array([])
-
-    los_a = np.interp(days, asc_days[valid_asc], asc_at_station[valid_asc])
-    los_d = np.interp(days, desc_days[valid_desc], desc_at_station[valid_desc])
-
-    u_e = (los_a * (-C2) - los_d * (-C1)) / det
-    u_u = (A1 * los_d - A2 * los_a) / det
-    return days, u_e, u_u
-
 
 # ---------------------------------------------------------------------------
 # GNSS loading
@@ -460,13 +458,8 @@ def load_gnss(stations_rows, gnss_rows):
 
 
 # ---------------------------------------------------------------------------
-# Ramp / offset estimation and correction
+# Per-track ramp estimation and correction (native LOS domain)
 # ---------------------------------------------------------------------------
-def station_insar_gnss_residuals(days, insar_u, gnss_days, gnss_u):
-    gnss_at = np.interp(days, gnss_days, gnss_u)
-    return days, insar_u - gnss_at
-
-
 def fit_line(x, y):
     A = np.vstack([np.ones_like(x), x]).T
     coef, *_ = np.linalg.lstsq(A, y, rcond=None)
@@ -474,41 +467,67 @@ def fit_line(x, y):
     dof = max(len(x) - 2, 1)
     sigma2 = np.sum(resid ** 2) / dof
     cov = sigma2 * np.linalg.inv(A.T @ A)
-    return coef[0], coef[1], np.sqrt(max(cov[1, 1], 0.0))
+    return coef[0], coef[1], np.sqrt(max(cov[0, 0], 0.0)), np.sqrt(max(cov[1, 1], 0.0))
+
+
+def gnss_los_at_track_epochs(track, gdays, ge, gn, gu):
+    """Project a station's own (E, N, U) record into this track's LOS
+    geometry, then sample it at the track's own epoch days."""
+    pred_los_daily = los_projection_full(ge, gn, gu, track.incidence_deg, track.heading_deg)
+    epoch_days = np.array(track.epoch_days, dtype=float)
+    return np.interp(epoch_days, gdays, pred_los_daily)
 
 
 DRIFT_Z_THRESHOLD = 3.0
 DRIFT_MAGNITUDE_FLOOR_M = 0.05  # below this, a significant-but-small slope is
 # attributed to ordinary SBAS/interpolation reconstruction imprecision, not a
 # genuine unmodeled local process; only a trend that is BOTH statistically
-# significant AND large enough in absolute terms is treated as a bad station.
+# significant AND large enough in absolute terms, IN BOTH TRACKS
+# INDEPENDENTLY, is treated as a bad station. Requiring agreement between two
+# independently-processed tracks is what separates a real local process
+# (which projects into both LOS geometries, since the incidence angles are
+# similar) from one track's own reconstruction noise.
 
 
-def screen_and_fit_ramp(station_offsets, station_xy):
-    """station_offsets: dict sid -> (days, residuals). Returns (ramp_coefs,
-    used_ids, excluded_ids, intercepts)."""
-    intercepts, slopes, slope_se, total_drift, ids = {}, {}, {}, {}, []
-    for sid, (days, resid) in station_offsets.items():
-        if len(days) < 5:
+def per_track_station_screen(track, raw_at_stations, station_ids, stations, gnss_series):
+    """Returns dict sid -> (intercept, intercept_se, exceeds_threshold: bool)."""
+    out = {}
+    for k, sid in enumerate(station_ids):
+        raw = raw_at_stations[k]
+        valid = ~np.isnan(raw)
+        if valid.sum() < 5:
             continue
-        c0, c1, se1 = fit_line(days.astype(float), resid)
-        intercepts[sid], slopes[sid], slope_se[sid] = c0, c1, se1
-        total_drift[sid] = c1 * (days.max() - days.min())
-        ids.append(sid)
+        epoch_days = np.array(track.epoch_days, dtype=float)[valid]
+        gdays = np.array([r[0] for r in gnss_series[sid]], dtype=float)
+        ge = np.array([r[1] for r in gnss_series[sid]])
+        gn = np.array([r[2] for r in gnss_series[sid]])
+        gu = np.array([r[3] for r in gnss_series[sid]])
+        pred_los = gnss_los_at_track_epochs(track, gdays, ge, gn, gu)[valid]
+        resid = raw[valid] - pred_los
+        c0, c1, se0, se1 = fit_line(epoch_days, resid)
+        z = c1 / se1 if se1 > 0 else 0.0
+        total_drift = c1 * (epoch_days.max() - epoch_days.min())
+        exceeds = abs(z) > DRIFT_Z_THRESHOLD and abs(total_drift) > DRIFT_MAGNITUDE_FLOOR_M
+        out[sid] = (c0, se0, exceeds)
+    return out
 
-    z = {sid: slopes[sid] / slope_se[sid] if slope_se[sid] > 0 else 0.0 for sid in ids}
-    excluded = [
-        sid for sid in ids
-        if abs(z[sid]) > DRIFT_Z_THRESHOLD and abs(total_drift[sid]) > DRIFT_MAGNITUDE_FLOOR_M
-    ]
-    used = [sid for sid in ids if sid not in excluded]
 
-    xs = np.array([station_xy[sid][0] for sid in used])
-    ys = np.array([station_xy[sid][1] for sid in used])
-    offs = np.array([intercepts[sid] for sid in used])
-    A = np.vstack([np.ones_like(xs), xs, ys]).T
-    coef, *_ = np.linalg.lstsq(A, offs, rcond=None)
-    return coef, used, excluded, intercepts
+def fit_ramp(intercepts, intercept_ses, used_ids, stations):
+    """Weighted least squares: a station whose own residual-intercept is
+    poorly determined (large se0, e.g. a genuinely noisy but unbiased
+    station) is down-weighted rather than treated as equally informative
+    as a precise one. With only ~n_stations points and 3 free parameters,
+    this small regression has far less redundancy than the joint source
+    inversion, so an unweighted noisy outlier has real leverage here."""
+    xs = np.array([stations[sid][0] for sid in used_ids])
+    ys = np.array([stations[sid][1] for sid in used_ids])
+    offs = np.array([intercepts[sid] for sid in used_ids])
+    ses = np.array([max(intercept_ses[sid], 1e-6) for sid in used_ids])
+    w = 1.0 / ses
+    A = np.vstack([np.ones_like(xs), xs, ys]).T * w[:, None]
+    b = offs * w
+    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+    return coef
 
 
 def ramp_value(coef, x, y):
@@ -516,34 +535,144 @@ def ramp_value(coef, x, y):
 
 
 # ---------------------------------------------------------------------------
-# Two-segment (unknown breakpoint) weighted regression
+# Joint McTigue (1987) source + two-segment rate-history inversion
 # ---------------------------------------------------------------------------
-def segmented_design(t, tb):
-    before = np.minimum(t, tb)
-    after = np.maximum(t - tb, 0.0)
-    return np.vstack([np.ones_like(t), before, after]).T
+PARAM_NAMES = ["x0", "y0", "depth", "radius", "rate1", "rate2", "t_break"]
 
 
-def fit_segmented(t, y, sigma, tb_grid):
+def cumulative_dv_at(day, rate1, rate2, t_break):
+    day = np.asarray(day, dtype=float)
+    before = rate1 * day
+    after = rate1 * t_break + rate2 * (day - t_break)
+    return np.where(day <= t_break, before, after)
+
+
+def model_enu(theta, x, y, day):
+    x0, y0, depth, radius, rate1, rate2, t_break = theta
+    dv = cumulative_dv_at(day, rate1, rate2, t_break)
+    return mctigue_displacement(x, y, depth, dv, radius, x0, y0)
+
+
+def build_residual_fn(gnss_data, insar_data):
+    def resid_fn(theta):
+        parts = []
+        for g in gnss_data:
+            ux, uy, uz = model_enu(theta, g["x"], g["y"], g["day"])
+            parts.append((ux - g["e"]) / g["sige"])
+            parts.append((uy - g["n"]) / g["sign"])
+            parts.append((uz - g["u"]) / g["sigu"])
+        for ins in insar_data:
+            ux, uy, uz = model_enu(theta, ins["x"], ins["y"], ins["day"])
+            pred_los = los_projection_full(ux, uy, uz, ins["incidence"], ins["heading"])
+            parts.append((pred_los - ins["los"]) / ins["sigma"])
+        return np.concatenate(parts) if parts else np.zeros(0)
+    return resid_fn
+
+
+def bounds_for(record_last_day):
+    lower = [-6000.0, -6000.0, 300.0, 50.0, 0.0, 0.0, 15.0]
+    upper = [6000.0, 6000.0, 6000.0, 1800.0, 5.0e5, 5.0e5, record_last_day - 15.0]
+    return np.array(lower), np.array(upper)
+
+
+def initial_guess(used_gnss_stations, stations, gnss_series, record_last_day):
+    """Displacement-magnitude-weighted centroid for (x0, y0); generic
+    starting values for depth/radius; rate scale from a rough sensitivity
+    back-out at the highest-signal station -- no true parameter values are
+    used, only what is observable from the visible data."""
+    weights, xs, ys, best_sid, best_w = [], [], [], None, -1.0
+    for sid in used_gnss_stations:
+        rows = gnss_series[sid]
+        u = np.array([r[3] for r in rows])
+        w = abs(float(u[-1] - u[0]))
+        weights.append(w)
+        xs.append(stations[sid][0])
+        ys.append(stations[sid][1])
+        if w > best_w:
+            best_w, best_sid = w, sid
+    weights = np.array(weights)
+    if weights.sum() <= 0:
+        x0 = float(np.mean(xs))
+        y0 = float(np.mean(ys))
+    else:
+        x0 = float(np.sum(weights * np.array(xs)) / weights.sum())
+        y0 = float(np.sum(weights * np.array(ys)) / weights.sum())
+    depth0, radius0 = 2000.0, 500.0
+
+    rows = gnss_series[best_sid]
+    days = np.array([r[0] for r in rows], dtype=float)
+    u = np.array([r[3] for r in rows])
+    rough_slope, _intercept = np.polyfit(days, u, 1)
+    sx, sy = stations[best_sid]
+    sensitivity = mctigue_displacement(
+        np.array([sx]), np.array([sy]), depth0, np.array([1.0]), radius0, x0, y0
+    )[2][0]
+    sensitivity = sensitivity if abs(sensitivity) > 1e-12 else 1e-12
+    rate_scale = max(abs(float(rough_slope) / sensitivity), 100.0)
+    return np.array([x0, y0, depth0, radius0, rate_scale, 2.0 * rate_scale, record_last_day / 2.0])
+
+
+def run_joint_inversion(gnss_data, insar_data, used_gnss_stations, stations, gnss_series, record_last_day):
+    lower, upper = bounds_for(record_last_day)
+    theta0 = np.clip(
+        initial_guess(used_gnss_stations, stations, gnss_series, record_last_day), lower, upper
+    )
+
+    tb_candidates = np.linspace(record_last_day * 0.15, record_last_day * 0.85, 5)
+    gnss_only_resid = build_residual_fn(gnss_data, [])
+
     best = None
-    w = 1.0 / np.maximum(sigma, 1e-6)
-    for tb in tb_grid:
-        A = segmented_design(t, tb) * w[:, None]
-        b = y * w
-        coef, *_ = np.linalg.lstsq(A, b, rcond=None)
-        resid = b - A @ coef
-        sse = float(np.sum(resid ** 2))
-        if best is None or sse < best[0]:
-            best = (sse, tb, coef)
-    return best  # (sse, tb, [c0, rate1, rate2])
+    for tb in tb_candidates:
+        start = theta0.copy()
+        start[6] = tb
+        start = np.clip(start, lower, upper)
+        try:
+            res = least_squares(gnss_only_resid, start, bounds=(lower, upper), method="trf")
+        except Exception:
+            continue
+        cost = float(np.sum(res.fun ** 2))
+        if best is None or cost < best[0]:
+            best = (cost, res.x)
+    pass1_theta = best[1] if best is not None else theta0
+
+    full_resid = build_residual_fn(gnss_data, insar_data)
+    best2 = None
+    for perturb in (0.0, 0.1, -0.1):
+        start = np.clip(pass1_theta * (1.0 + perturb * np.array([0, 0, 1, 1, 1, 1, 0])), lower, upper)
+        try:
+            res = least_squares(full_resid, start, bounds=(lower, upper), method="trf")
+        except Exception:
+            continue
+        cost = float(np.sum(res.fun ** 2))
+        if best2 is None or cost < best2[0]:
+            best2 = (cost, res)
+    final = best2[1]
+
+    jac = final.jac
+    try:
+        cov = np.linalg.pinv(jac.T @ jac)
+    except np.linalg.LinAlgError:
+        cov = np.eye(len(final.x)) * 1e6
+    return final.x, cov
 
 
-def fit_single_rate(t, y, sigma):
-    w = 1.0 / np.maximum(sigma, 1e-6)
-    A = np.vstack([np.ones_like(t), t]).T * w[:, None]
-    b = y * w
-    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
-    return coef  # [c0, rate]
+Z95 = 1.959963984540054
+
+
+def delta_ci(f, theta_hat, cov_theta):
+    theta_hat = np.asarray(theta_hat, dtype=float)
+    n = len(theta_hat)
+    grad = np.zeros(n)
+    for i in range(n):
+        step = 1e-5 * max(abs(theta_hat[i]), 1.0)
+        tp, tm = theta_hat.copy(), theta_hat.copy()
+        tp[i] += step
+        tm[i] -= step
+        grad[i] = (f(tp) - f(tm)) / (2 * step)
+    var = float(grad @ cov_theta @ grad)
+    se = float(np.sqrt(max(var, 0.0)))
+    val = float(f(theta_hat))
+    return val, [val - Z95 * se, val + Z95 * se]
 
 
 # ---------------------------------------------------------------------------
@@ -563,102 +692,157 @@ def main():
     station_ids = sorted(stations.keys())
     sx = np.array([stations[s][0] for s in station_ids])
     sy = np.array([stations[s][1] for s in station_ids])
+    record_last_day = max(int(r["day"]) for r in gnss_rows)
 
-    asc_at_stations = local_linear_interpolate(asc, cum_asc, sx, sy)
-    desc_at_stations = local_linear_interpolate(desc, cum_desc, sx, sy)
+    raw_asc_at_stations = local_linear_interpolate(asc, cum_asc, sx, sy)
+    raw_desc_at_stations = local_linear_interpolate(desc, cum_desc, sx, sy)
 
-    all_days = sorted(set(asc.epoch_days) | set(desc.epoch_days))
+    # ---------------- Per-track GNSS screening (native LOS domain) ---------
+    asc_screen = per_track_station_screen(asc, raw_asc_at_stations, station_ids, stations, gnss_series)
+    desc_screen = per_track_station_screen(desc, raw_desc_at_stations, station_ids, stations, gnss_series)
 
-    insar_vertical = {}  # sid -> (days, u_u)
-    for k, sid in enumerate(station_ids):
-        days, u_e, u_u = decompose_vertical_eastwest(
-            asc, asc_at_stations[k], desc, desc_at_stations[k], all_days
-        )
-        insar_vertical[sid] = (days, u_u)
+    excluded_stations = sorted(
+        sid for sid in station_ids
+        if asc_screen.get(sid, (0.0, 0.0, False))[2] and desc_screen.get(sid, (0.0, 0.0, False))[2]
+    )
+    used_stations = [sid for sid in station_ids if sid not in excluded_stations]
 
-    station_offsets = {}
-    for sid in station_ids:
-        days_i, u_u = insar_vertical[sid]
-        if len(days_i) < 5:
-            continue
-        gdays = np.array([r[0] for r in gnss_series[sid]])
-        gu = np.array([r[3] for r in gnss_series[sid]])
-        d, resid = station_insar_gnss_residuals(days_i, u_u, gdays, gu)
-        station_offsets[sid] = (d, resid)
+    asc_intercepts = {sid: asc_screen[sid][0] for sid in used_stations if sid in asc_screen}
+    asc_intercept_ses = {sid: asc_screen[sid][1] for sid in used_stations if sid in asc_screen}
+    desc_intercepts = {sid: desc_screen[sid][0] for sid in used_stations if sid in desc_screen}
+    desc_intercept_ses = {sid: desc_screen[sid][1] for sid in used_stations if sid in desc_screen}
+    ramp_asc = fit_ramp(asc_intercepts, asc_intercept_ses, list(asc_intercepts), stations)
+    ramp_desc = fit_ramp(desc_intercepts, desc_intercept_ses, list(desc_intercepts), stations)
 
-    ramp_coef, used_stations, excluded_stations, intercepts = screen_and_fit_ramp(
-        station_offsets, stations
+    # ---------------- Apply per-track ramp correction everywhere -----------
+    corrected_cum_asc = cum_asc - ramp_value(ramp_asc, asc.x, asc.y)[:, None]
+    corrected_cum_desc = cum_desc - ramp_value(ramp_desc, desc.x, desc.y)[:, None]
+    corrected_asc_at_stations = raw_asc_at_stations - ramp_value(ramp_asc, sx, sy)[:, None]
+    corrected_desc_at_stations = raw_desc_at_stations - ramp_value(ramp_desc, sx, sy)[:, None]
+
+    # ---------------- Assemble GNSS data for the joint inversion -----------
+    gnss_data = []
+    for sid in used_stations:
+        rows = gnss_series[sid]
+        gnss_data.append({
+            "x": stations[sid][0], "y": stations[sid][1],
+            "day": np.array([r[0] for r in rows], dtype=float),
+            "e": np.array([r[1] for r in rows]), "n": np.array([r[2] for r in rows]),
+            "u": np.array([r[3] for r in rows]),
+            "sige": np.array([r[4] for r in rows]), "sign": np.array([r[5] for r in rows]),
+            "sigu": np.array([r[6] for r in rows]),
+        })
+
+    # ---------------- Assemble a near-field InSAR sample --------------------
+    x0_guess, y0_guess = initial_guess(used_stations, stations, gnss_series, record_last_day)[:2]
+    insar_pooled_sigma_asc = float(np.sqrt(np.mean(list(var_asc.values())))) if var_asc else 0.005
+    insar_pooled_sigma_desc = float(np.sqrt(np.mean(list(var_desc.values())))) if var_desc else 0.005
+
+    def sample_insar(track, corrected_cum, pooled_sigma):
+        """One batched entry per track (arrays, not one dict per point-epoch
+        pair) so the model is evaluated vectorized, not looped in Python."""
+        d2 = (track.x - x0_guess) ** 2 + (track.y - y0_guess) ** 2
+        near = np.where(d2 < INSAR_NEAR_FIELD_RADIUS_M ** 2)[0]
+        if len(near) > INSAR_MAX_POINTS_PER_TRACK:
+            near = np.random.default_rng(0).choice(near, size=INSAR_MAX_POINTS_PER_TRACK, replace=False)
+        xs, ys, days, los_vals = [], [], [], []
+        for p in near:
+            for e, day in enumerate(track.epoch_days):
+                val = corrected_cum[p, e]
+                if np.isnan(val):
+                    continue
+                xs.append(track.x[p])
+                ys.append(track.y[p])
+                days.append(float(day))
+                los_vals.append(val)
+        if not xs:
+            return None
+        return {
+            "x": np.array(xs), "y": np.array(ys), "day": np.array(days),
+            "los": np.array(los_vals), "sigma": pooled_sigma,
+            "incidence": track.incidence_deg, "heading": track.heading_deg,
+        }
+
+    insar_data = [
+        d for d in (
+            sample_insar(asc, corrected_cum_asc, insar_pooled_sigma_asc),
+            sample_insar(desc, corrected_cum_desc, insar_pooled_sigma_desc),
+        ) if d is not None
+    ]
+
+    # ---------------- Joint McTigue source + rate-history inversion --------
+    theta_hat, cov_theta = run_joint_inversion(
+        gnss_data, insar_data, used_stations, stations, gnss_series, record_last_day
     )
 
-    def corrected_insar_series(sid):
-        days_i, u_u = insar_vertical[sid]
-        if len(days_i) == 0:
-            return days_i, u_u
-        x, y = stations[sid]
-        return days_i, u_u - ramp_value(ramp_coef, x, y)
+    px, py = stations[PRIMARY_STATION_ID]
+    cx, cy = stations[CONTROL_STATION_ID]
 
-    def combined_series(sid):
-        days_i, u_u_corr = corrected_insar_series(sid)
-        gdays = np.array([r[0] for r in gnss_series[sid]])
-        gu = np.array([r[3] for r in gnss_series[sid]])
-        gsig = np.array([r[6] for r in gnss_series[sid]])
-        insar_sigma = 0.004  # conservative pooled InSAR-derived-vertical noise floor
-        t = np.concatenate([gdays.astype(float), days_i.astype(float)])
-        y = np.concatenate([gu, u_u_corr])
-        sig = np.concatenate([gsig, np.full(len(days_i), insar_sigma)])
-        order = np.argsort(t)
-        return t[order], y[order], sig[order]
+    def f_param(i):
+        return lambda th: th[i]
 
-    record_last_day = max(int(r["day"]) for r in gnss_rows)
-    tb_grid = np.arange(30, record_last_day - 30, 5.0)
+    def f_rate_before(th):
+        return mctigue_displacement(np.array([px]), np.array([py]), th[2], np.array([th[4]]), th[3], th[0], th[1])[2][0]
 
-    t_p, y_p, sig_p = combined_series(PRIMARY_STATION_ID)
-    sse, tb_hat, coef_p = fit_segmented(t_p, y_p, sig_p, tb_grid)
-    c0_hat, rate1_hat, rate2_hat = coef_p
-    cumulative_primary = rate1_hat * tb_hat + rate2_hat * (record_last_day - tb_hat)
+    def f_rate_after(th):
+        return mctigue_displacement(np.array([px]), np.array([py]), th[2], np.array([th[5]]), th[3], th[0], th[1])[2][0]
 
-    t_c, y_c, sig_c = combined_series(CONTROL_STATION_ID)
-    coef_c = fit_single_rate(t_c, y_c, sig_c)
-    cumulative_control = coef_c[1] * record_last_day
+    def f_cumulative(x, y):
+        def f(th):
+            dv = cumulative_dv_at(record_last_day, th[4], th[5], th[6])
+            return mctigue_displacement(np.array([x]), np.array([y]), th[2], np.array([dv]), th[3], th[0], th[1])[2][0]
+        return f
 
-    # ---------------- Bootstrap CIs (parametric, using estimated sigmas) ----
-    boot_rate1, boot_rate2, boot_tb, boot_cum = [], [], [], []
-    for _ in range(N_BOOTSTRAP):
-        y_star = y_p + sig_p * RNG.standard_normal(len(y_p))
-        _, tb_s, coef_s = fit_segmented(t_p, y_star, sig_p, tb_grid)
-        boot_rate1.append(coef_s[1])
-        boot_rate2.append(coef_s[2])
-        boot_tb.append(tb_s)
-        boot_cum.append(coef_s[1] * tb_s + coef_s[2] * (record_last_day - tb_s))
+    x0_hat, x0_ci = delta_ci(f_param(0), theta_hat, cov_theta)
+    y0_hat, y0_ci = delta_ci(f_param(1), theta_hat, cov_theta)
+    depth_hat, depth_ci = delta_ci(f_param(2), theta_hat, cov_theta)
+    radius_hat, radius_ci = delta_ci(f_param(3), theta_hat, cov_theta)
+    tb_hat, tb_ci = delta_ci(f_param(6), theta_hat, cov_theta)
+    rate_before_hat, rate_before_ci = delta_ci(f_rate_before, theta_hat, cov_theta)
+    rate_after_hat, rate_after_ci = delta_ci(f_rate_after, theta_hat, cov_theta)
+    cum_primary_hat, cum_primary_ci = delta_ci(f_cumulative(px, py), theta_hat, cov_theta)
+    cum_control_hat, _ = delta_ci(f_cumulative(cx, cy), theta_hat, cov_theta)
 
-    def ci95(vals):
-        lo, hi = np.percentile(vals, [2.5, 97.5])
-        return [float(lo), float(hi)]
-
-    # ---------------- Final InSAR-vs-GNSS reconciliation --------------------
+    # ---------------- Final InSAR-vs-GNSS reconciliation (native LOS) ------
     sq_errors = []
-    for sid in used_stations:
-        days_i, u_u_corr = corrected_insar_series(sid)
-        gdays = np.array([r[0] for r in gnss_series[sid]])
-        gu = np.array([r[3] for r in gnss_series[sid]])
-        gu_at = np.interp(days_i, gdays, gu)
-        sq_errors.extend(((u_u_corr - gu_at) ** 2).tolist())
+    for track, corrected_at_stations, screen in (
+        (asc, corrected_asc_at_stations, asc_screen), (desc, corrected_desc_at_stations, desc_screen)
+    ):
+        epoch_days = np.array(track.epoch_days, dtype=float)
+        for k, sid in enumerate(station_ids):
+            if sid not in used_stations:
+                continue
+            raw = corrected_at_stations[k]
+            valid = ~np.isnan(raw)
+            if valid.sum() == 0:
+                continue
+            rows = gnss_series[sid]
+            gdays = np.array([r[0] for r in rows], dtype=float)
+            ge = np.array([r[1] for r in rows])
+            gn = np.array([r[2] for r in rows])
+            gu = np.array([r[3] for r in rows])
+            pred_los = gnss_los_at_track_epochs(track, gdays, ge, gn, gu)
+            sq_errors.extend(((raw[valid] - pred_los[valid]) ** 2).tolist())
     rmse = float(np.sqrt(np.mean(sq_errors))) if sq_errors else float("nan")
 
     result = {
-        "vertical_rate_before_m_per_day": float(rate1_hat),
-        "vertical_rate_after_m_per_day": float(rate2_hat),
-        "rate_change_day": float(tb_hat),
-        "cumulative_vertical_displacement_m": float(cumulative_primary),
-        "vertical_rate_before_uncertainty_95": ci95(boot_rate1),
-        "vertical_rate_after_uncertainty_95": ci95(boot_rate2),
-        "rate_change_day_uncertainty_95": ci95(boot_tb),
-        "cumulative_vertical_displacement_uncertainty_95": ci95(boot_cum),
-        "control_zone_cumulative_vertical_displacement_m": float(cumulative_control),
+        "x0_m": x0_hat, "y0_m": y0_hat, "depth_m": depth_hat, "radius_m": radius_hat,
+        "x0_uncertainty_95": x0_ci, "y0_uncertainty_95": y0_ci,
+        "depth_uncertainty_95": depth_ci, "radius_uncertainty_95": radius_ci,
+        "vertical_rate_before_m_per_day": rate_before_hat,
+        "vertical_rate_after_m_per_day": rate_after_hat,
+        "rate_change_day": tb_hat,
+        "cumulative_vertical_displacement_m": cum_primary_hat,
+        "vertical_rate_before_uncertainty_95": rate_before_ci,
+        "vertical_rate_after_uncertainty_95": rate_after_ci,
+        "rate_change_day_uncertainty_95": tb_ci,
+        "cumulative_vertical_displacement_uncertainty_95": cum_primary_ci,
+        "control_zone_cumulative_vertical_displacement_m": cum_control_hat,
         "insar_gnss_ramp_coefficients": {
-            "constant_m": float(ramp_coef[0]),
-            "gradient_x_m_per_m": float(ramp_coef[1]),
-            "gradient_y_m_per_m": float(ramp_coef[2]),
+            "ascending": {"constant_m": float(ramp_asc[0]), "gradient_x_m_per_m": float(ramp_asc[1]),
+                          "gradient_y_m_per_m": float(ramp_asc[2])},
+            "descending": {"constant_m": float(ramp_desc[0]), "gradient_x_m_per_m": float(ramp_desc[1]),
+                           "gradient_y_m_per_m": float(ramp_desc[2])},
         },
         "gnss_stations_used": used_stations,
         "gnss_stations_excluded": excluded_stations,

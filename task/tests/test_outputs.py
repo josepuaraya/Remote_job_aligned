@@ -1,13 +1,20 @@
 """
 test_outputs.py -- verifier for the InSAR/GNSS volcano deformation
-rate-change task.
+rate-change task (McTigue joint source inversion).
 
 Every tolerance below was calibrated by running the reference solution
-(task/solution/solve.py) against six independent synthetic realizations
+(task/solution/solve.py) against eight independent synthetic realizations
 of the same scenario (different generator seeds) and taking roughly a
 3-5x margin over the largest error/width actually observed. See
-task/solution/process.md for the calibration table. Nothing here is a
-pasted expected value -- everything is recomputed from
+task/solution/process.md for the full calibration table, including the
+finding that the source RADIUS is only weakly identified by this data
+(the reference solution itself shows errors from ~5% to ~95% of the true
+value across seeds, including one realization where the fit pins radius
+at its search boundary) -- radius is therefore checked for format and
+self-consistency only, not point-estimate accuracy, the same treatment
+Task3-style tasks give other weakly-identified-by-design outputs.
+
+Nothing here is a pasted expected value -- everything is recomputed from
 task/tests/data/answer_key.json (the private ground truth) or from the
 public data files also copied into task/tests/data/.
 """
@@ -25,6 +32,8 @@ RESULT_PATH = OUTPUT_DIR / "result.json"
 ANSWER_KEY_PATH = TESTS_DIR / "data" / "answer_key.json"
 
 REQUIRED_KEYS = {
+    "x0_m", "y0_m", "depth_m", "radius_m",
+    "x0_uncertainty_95", "y0_uncertainty_95", "depth_uncertainty_95", "radius_uncertainty_95",
     "vertical_rate_before_m_per_day",
     "vertical_rate_after_m_per_day",
     "rate_change_day",
@@ -42,22 +51,31 @@ REQUIRED_KEYS = {
 }
 
 # Point-estimate tolerances (see process.md calibration table: max observed
-# error across 6 seeds was 5.16% / 2.18% / 5 days / 1.53% respectively).
-RATE_BEFORE_REL_TOL = 0.20
-RATE_AFTER_REL_TOL = 0.10
-RATE_CHANGE_DAY_ABS_TOL = 20.0
-CUMULATIVE_REL_TOL = 0.10
+# error across 8 seeds was 52.9 m / 52.1 m / 6.32% / 7.08% / 3.27% / 6.3
+# days / 2.76% respectively for x0 / y0 / depth / rate-before / rate-after /
+# rate-change-day / cumulative displacement).
+LOCATION_ABS_TOL_M = 200.0
+DEPTH_REL_TOL = 0.25
+RATE_BEFORE_REL_TOL = 0.25
+RATE_AFTER_REL_TOL = 0.15
+RATE_CHANGE_DAY_ABS_TOL = 25.0
+CUMULATIVE_REL_TOL = 0.12
 CONTROL_ABS_TOL_M = 0.010
 
-# CI sanity caps (max observed width/point-estimate ratio across 6 seeds:
-# 0.124 / 0.050 / 15 days / 0.027 respectively).
+# CI sanity caps (max observed width/point-estimate ratio, or width in
+# days, across 8 seeds).
+LOCATION_CI_WIDTH_CAP_M = 800.0
+DEPTH_CI_WIDTH_CAP_FRAC = 0.5
 RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.5
 RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.3
-RATE_CHANGE_DAY_CI_WIDTH_CAP = 60.0
-CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.12
+RATE_CHANGE_DAY_CI_WIDTH_CAP = 80.0
+CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.15
 
-RMSE_SANITY_CAP_M = 0.03  # max observed across 6 seeds was ~0.012 m
-MAX_GNSS_EXCLUDED = 4     # max observed across 6 seeds was 3
+RADIUS_CI_WIDTH_SANITY_CAP_M = 2.0e5  # radius is weakly identified (see above) and a
+# genuinely honest CI can be tens of thousands of meters wide (observed up to ~50,000 m
+# across 8 seeds); this only catches a degenerate placeholder (e.g. bounds of +/-1e9).
+RMSE_SANITY_CAP_M = 0.03  # max observed across 8 seeds was ~0.015 m
+MAX_GNSS_EXCLUDED = 4     # max observed across 8 seeds was 2
 MAX_UNWRAP_FLAGGED = 4    # true count is 2; allow some slack for a
                           # differently-implemented method flagging one
                           # extra borderline interferogram
@@ -83,37 +101,71 @@ def _ci(submitted, key):
     return lo, hi
 
 
+def _check_point_and_ci(submitted, point_key, ci_key, true_val, rel_tol=None, abs_tol=None,
+                         ci_width_cap=None, ci_width_frac_cap=None):
+    reported = float(submitted[point_key])
+    if rel_tol is not None:
+        rel_err = abs(reported - true_val) / abs(true_val)
+        assert rel_err <= rel_tol, (
+            f"{point_key}={reported} vs true={true_val} (rel err {rel_err:.3f} > {rel_tol})"
+        )
+    if abs_tol is not None:
+        err = abs(reported - true_val)
+        assert err <= abs_tol, f"{point_key}={reported} vs true={true_val} (abs err {err} > {abs_tol})"
+
+    lo, hi = _ci(submitted, ci_key)
+    assert lo <= reported <= hi, f"{point_key} point estimate outside its own reported CI"
+    if ci_width_cap is not None:
+        assert (hi - lo) <= ci_width_cap, f"{ci_key} implausibly wide: {hi - lo} > {ci_width_cap}"
+    if ci_width_frac_cap is not None:
+        cap = ci_width_frac_cap * abs(reported)
+        assert (hi - lo) <= cap, f"{ci_key} implausibly wide: {hi - lo} > {cap}"
+    return reported
+
+
 def test_required_keys_present(submitted):
     missing = REQUIRED_KEYS - set(submitted)
     assert not missing, f"Missing required keys: {missing}"
 
 
+def test_source_location_within_tolerance(submitted, answer_key):
+    _check_point_and_ci(submitted, "x0_m", "x0_uncertainty_95", answer_key["true_x0_m"],
+                         abs_tol=LOCATION_ABS_TOL_M, ci_width_cap=LOCATION_CI_WIDTH_CAP_M)
+    _check_point_and_ci(submitted, "y0_m", "y0_uncertainty_95", answer_key["true_y0_m"],
+                         abs_tol=LOCATION_ABS_TOL_M, ci_width_cap=LOCATION_CI_WIDTH_CAP_M)
+
+
+def test_source_depth_within_tolerance(submitted, answer_key):
+    _check_point_and_ci(submitted, "depth_m", "depth_uncertainty_95", answer_key["true_depth_m"],
+                         rel_tol=DEPTH_REL_TOL, ci_width_frac_cap=DEPTH_CI_WIDTH_CAP_FRAC)
+
+
+def test_source_radius_format_only(submitted, answer_key):
+    """Radius is only weakly identified by this data (see process.md); it
+    is checked for physical plausibility and self-consistency, not
+    point-estimate accuracy -- the same treatment Task3-style tasks give
+    other outputs that are 'checked only for format.'"""
+    radius = float(submitted["radius_m"])
+    depth = float(submitted["depth_m"])
+    assert radius == radius and radius > 0, "radius_m must be a finite, positive number"
+    assert radius < depth, "radius_m must be smaller than depth_m (a surfacing source is not physical here)"
+    lo, hi = _ci(submitted, "radius_uncertainty_95")
+    assert lo <= radius <= hi, "radius_m point estimate outside its own reported CI"
+    assert (hi - lo) <= RADIUS_CI_WIDTH_SANITY_CAP_M, (
+        f"radius_uncertainty_95 implausibly wide: {hi - lo} > {RADIUS_CI_WIDTH_SANITY_CAP_M}"
+    )
+
+
 def test_vertical_rate_before_within_tolerance(submitted, answer_key):
     true_val = answer_key["true_vertical_rate_before_m_per_day_primary"]
-    reported = float(submitted["vertical_rate_before_m_per_day"])
-    rel_err = abs(reported - true_val) / abs(true_val)
-    assert rel_err <= RATE_BEFORE_REL_TOL, (
-        f"vertical_rate_before_m_per_day={reported} vs true={true_val} "
-        f"(rel err {rel_err:.3f} > {RATE_BEFORE_REL_TOL})"
-    )
-    lo, hi = _ci(submitted, "vertical_rate_before_uncertainty_95")
-    assert lo <= reported <= hi, "vertical_rate_before point estimate outside its own CI"
-    cap = RATE_BEFORE_CI_WIDTH_CAP_FRAC * abs(reported)
-    assert (hi - lo) <= cap, f"vertical_rate_before CI implausibly wide: {hi - lo} > {cap}"
+    _check_point_and_ci(submitted, "vertical_rate_before_m_per_day", "vertical_rate_before_uncertainty_95",
+                         true_val, rel_tol=RATE_BEFORE_REL_TOL, ci_width_frac_cap=RATE_BEFORE_CI_WIDTH_CAP_FRAC)
 
 
 def test_vertical_rate_after_within_tolerance(submitted, answer_key):
     true_val = answer_key["true_vertical_rate_after_m_per_day_primary"]
-    reported = float(submitted["vertical_rate_after_m_per_day"])
-    rel_err = abs(reported - true_val) / abs(true_val)
-    assert rel_err <= RATE_AFTER_REL_TOL, (
-        f"vertical_rate_after_m_per_day={reported} vs true={true_val} "
-        f"(rel err {rel_err:.3f} > {RATE_AFTER_REL_TOL})"
-    )
-    lo, hi = _ci(submitted, "vertical_rate_after_uncertainty_95")
-    assert lo <= reported <= hi, "vertical_rate_after point estimate outside its own CI"
-    cap = RATE_AFTER_CI_WIDTH_CAP_FRAC * abs(reported)
-    assert (hi - lo) <= cap, f"vertical_rate_after CI implausibly wide: {hi - lo} > {cap}"
+    _check_point_and_ci(submitted, "vertical_rate_after_m_per_day", "vertical_rate_after_uncertainty_95",
+                         true_val, rel_tol=RATE_AFTER_REL_TOL, ci_width_frac_cap=RATE_AFTER_CI_WIDTH_CAP_FRAC)
 
 
 def test_rate_accelerates(submitted):
@@ -130,37 +182,22 @@ def test_rate_accelerates(submitted):
 
 
 def test_rate_change_day_within_tolerance(submitted, answer_key):
-    true_val = answer_key["true_rate_change_day"]
-    reported = float(submitted["rate_change_day"])
-    err = abs(reported - true_val)
-    assert err <= RATE_CHANGE_DAY_ABS_TOL, (
-        f"rate_change_day={reported} vs true={true_val} (err {err} > {RATE_CHANGE_DAY_ABS_TOL} days)"
-    )
-    lo, hi = _ci(submitted, "rate_change_day_uncertainty_95")
-    assert lo <= reported <= hi, "rate_change_day point estimate outside its own CI"
-    assert (hi - lo) <= RATE_CHANGE_DAY_CI_WIDTH_CAP, (
-        f"rate_change_day CI implausibly wide: {hi - lo} > {RATE_CHANGE_DAY_CI_WIDTH_CAP}"
-    )
+    _check_point_and_ci(submitted, "rate_change_day", "rate_change_day_uncertainty_95",
+                         answer_key["true_rate_change_day"], abs_tol=RATE_CHANGE_DAY_ABS_TOL,
+                         ci_width_cap=RATE_CHANGE_DAY_CI_WIDTH_CAP)
 
 
 def test_cumulative_displacement_within_tolerance(submitted, answer_key):
     true_val = answer_key["true_cumulative_vertical_displacement_m_primary"]
-    reported = float(submitted["cumulative_vertical_displacement_m"])
-    rel_err = abs(reported - true_val) / abs(true_val)
-    assert rel_err <= CUMULATIVE_REL_TOL, (
-        f"cumulative_vertical_displacement_m={reported} vs true={true_val} "
-        f"(rel err {rel_err:.3f} > {CUMULATIVE_REL_TOL})"
-    )
-    lo, hi = _ci(submitted, "cumulative_vertical_displacement_uncertainty_95")
-    assert lo <= reported <= hi, "cumulative_vertical_displacement point estimate outside its own CI"
-    cap = CUMULATIVE_CI_WIDTH_CAP_FRAC * abs(reported)
-    assert (hi - lo) <= cap, f"cumulative_vertical_displacement CI implausibly wide: {hi - lo} > {cap}"
+    _check_point_and_ci(submitted, "cumulative_vertical_displacement_m",
+                         "cumulative_vertical_displacement_uncertainty_95", true_val,
+                         rel_tol=CUMULATIVE_REL_TOL, ci_width_frac_cap=CUMULATIVE_CI_WIDTH_CAP_FRAC)
 
 
 def test_control_zone_shows_no_meaningful_deformation(submitted, answer_key):
     """The control station sits far enough from the source that the true
-    signal there is ~1.6 mm over the whole record -- a submission that
-    (incorrectly) extrapolates the near-source rate-change model to the
+    signal there is a couple of mm over the whole record -- a submission
+    that (incorrectly) extrapolates the near-source source model to the
     far field, or otherwise hallucinates deformation from noise, will be
     off by much more than this tolerance."""
     true_val = answer_key["true_cumulative_vertical_displacement_m_control"]
@@ -208,10 +245,13 @@ def test_unwrap_defects_detected(submitted, answer_key):
 def test_ramp_coefficients_format(submitted):
     ramp = submitted["insar_gnss_ramp_coefficients"]
     assert isinstance(ramp, dict)
-    for k in ("constant_m", "gradient_x_m_per_m", "gradient_y_m_per_m"):
-        assert k in ramp, f"insar_gnss_ramp_coefficients missing '{k}'"
-        v = float(ramp[k])
-        assert v == v and abs(v) < 1e6, f"insar_gnss_ramp_coefficients['{k}'] is not a sane finite number"
+    for track in ("ascending", "descending"):
+        assert track in ramp, f"insar_gnss_ramp_coefficients missing '{track}'"
+        track_ramp = ramp[track]
+        for k in ("constant_m", "gradient_x_m_per_m", "gradient_y_m_per_m"):
+            assert k in track_ramp, f"insar_gnss_ramp_coefficients['{track}'] missing '{k}'"
+            v = float(track_ramp[k])
+            assert v == v and abs(v) < 1e6, f"insar_gnss_ramp_coefficients['{track}']['{k}'] is not sane"
 
 
 def test_insar_gnss_reconciliation_rmse_is_sane(submitted):

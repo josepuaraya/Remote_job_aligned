@@ -1,4 +1,5 @@
 # Reference workflow: InSAR/GNSS volcano deformation rate-change
+# (McTigue joint source inversion)
 
 ## 1. Per-track SBAS network reconstruction
 
@@ -13,27 +14,24 @@ closed triangle of interferograms.
 ## 2. Unwrapping-error screening via loop closure
 
 For every closed triangle (i,j), (j,k), (i,k), the summed LOS change around
-the loop should be ~0 up to ordinary noise (it is a telescoping sum of
-cumulative displacement differences). Per point, per edge, closures are
-pooled across every triangle that edge belongs to and split into two 1-D
-clusters. A genuine discrete unwrapping defect shows a cluster pair
+the loop should be ~0 up to ordinary noise. Per point, per edge, closures
+are pooled across every triangle that edge belongs to and split into two
+1-D clusters. A genuine discrete unwrapping defect shows a cluster pair
 separated by close to one ambiguity cycle (the disclosed SAR system
-constant), covering a spatially coherent subset of points (checked via a
-k-NN neighborhood majority) -- ordinary atmospheric noise does not reproduce
-both properties together.
+constant), covering a spatially coherent subset of points (a k-NN
+neighborhood-majority check) -- ordinary atmospheric noise does not
+reproduce both properties together.
 
-A single triangle cannot say *which* of its three edges is defective (the
+A single triangle cannot say which of its three edges is defective (the
 closure is a property of the whole loop): several edges bordering the true
 defect typically pass the clustering screen too, since each shares exactly
 one anomalous triangle with it. This is resolved by arbitration: every
 candidate edge's proposed correction is applied as a trial, and the
 network-wide sum of squared closures (across every triangle, not just the
 ones used to find the candidate) is recomputed. Only the genuinely
-defective edge fixes *every* triangle it participates in; a wrong candidate
+defective edge fixes every triangle it participates in; a wrong candidate
 only shares one triangle with the truth and leaves any other anomalous
-triangle untouched. The candidate that minimizes the network-wide closure
-sum-of-squares, and only if that minimum is a substantial (>50%) reduction
-from the uncorrected baseline, is accepted and applied.
+triangle untouched.
 
 ## 3. Per-point network inversion (SBAS) with estimated weights
 
@@ -43,133 +41,165 @@ epoch. Decorrelation drops a different, randomly-sized fraction of points
 per interferogram, so each point's own subgraph of usable edges differs; an
 epoch not reachable from epoch 0 through that point's own edges is left
 `NaN` rather than silently reported as 0 (an unconstrained column's
-minimum-norm least-squares "solution" looks like real data but is not --
-this was caught during development by comparing reconstructed and true LOS
-at a diagnostic point and finding some epochs pinned at exactly 0).
+minimum-norm least-squares "solution" looks like real data but is not).
+Interferogram weights are estimated from an initial equal-weighted
+inversion's own residuals (variance-component estimation), not assumed.
 
-Interferogram weights are not assumed: an initial equal-weighted inversion's
-residuals are pooled per interferogram to estimate its own noise variance
-(variance-component estimation), and the inversion is re-run with those
-weights. This recovers the atmospheric noise heterogeneity between
-interferograms from the data's own redundancy, without needing to label any
-interferogram "clean" or "noisy" in advance.
+## 4. GNSS-to-InSAR reconciliation, done in InSAR's own native LOS domain
 
-## 4. Spatial interpolation and vertical/east-west decomposition
+InSAR is only ever a relative measurement, and ascending/descending are two
+independent products with two independent reference-frame errors. Both
+facts argue against decomposing to vertical before correcting: each GNSS
+station's own (E, N, U) record is instead projected into EACH track's LOS
+geometry separately (los_projection_full), compared directly against that
+track's own raw interpolated LOS at the station (a local first-order
+planar fit to the k nearest pixels, not a plain inverse-distance average --
+see the pitfalls section below for why that distinction matters). This
+gives one independent residual time series per station PER TRACK.
 
-Each track's per-epoch field is evaluated at the GNSS station coordinates
-via a local first-order (planar) fit within each station's k nearest
-points, not a plain inverse-distance average. This matters close to the
-source: a smoothly curving field (as the true Mogi field is, especially
-within a few hundred meters of the source) is systematically underestimated
-by an inverse-distance average, which can never exceed the values it
-averages, while a local plane fit is unbiased to first order as long as the
-neighborhood is small relative to the source depth. This was caught the
-same way as the inversion bug above: reconstructing the near-source
-stations' time series and comparing directly against the known true model
-showed the plain IDW estimate tracking only a fraction of the true rate.
+A station is excluded only when BOTH tracks' independent residual trends
+agree it is significant (|z| > 3) AND large in absolute terms over its own
+record span (> 3.5 cm) -- a real local process (e.g. monument instability)
+projects into both LOS geometries since the two tracks' incidence angles
+are nearly identical, whereas one track's own reconstruction noise
+generally does not coincidentally reproduce the same trend in the other,
+independently-processed track. The magnitude condition exists because the
+multi-stage reconstruction (network inversion + spatial interpolation) has
+its own real, non-adversarial precision floor of a few centimeters at some
+stations; requiring both significance AND magnitude, in both tracks
+independently, avoids excluding ordinary reconstruction imprecision.
 
-The two tracks' interpolated series are then linearly aligned onto a common
-day grid (restricted to each station's actual epoch overlap) and combined,
-assuming negligible north-south sensitivity (a consequence of the
-near-polar look geometry, matching the disclosed heading angles), into an
-InSAR-derived vertical displacement time series at each station.
+The remaining stations' residual intercepts are fit with a SEPARATE planar
+ramp `a + b*x + c*y` per track (each track has its own independent
+reference-frame/orbital error), via *weighted* least squares -- each
+station's contribution is weighted by the inverse of its own intercept's
+standard error, so a station that reports itself as imprecise (large
+sigma) is down-weighted in this small (~9-point, 3-parameter) regression
+rather than treated as equally informative as a precise one. This ramp is
+then subtracted from that track's LOS field everywhere.
 
-## 5. GNSS quality screening and the InSAR-to-GNSS reference correction
+## 5. Joint McTigue source + two-segment rate-history inversion
 
-InSAR is only ever a *relative* measurement; comparing it to GNSS requires
-knowing each station's InSAR-vs-GNSS offset first. Per station, the
-residual (InSAR-derived vertical minus GNSS-observed vertical) is regressed
-against time. A station whose residual trend is both statistically
-significant (|z| > 3 against its own regression standard error) AND large
-in absolute terms over its own record span (> 3.5 cm) is not explained by a
-simple constant reference-frame offset -- it behaves like an independent,
-unmodeled local process (e.g. monument instability) riding on top of the
-volcanic signal, and is excluded before the next step. The magnitude
-condition exists alongside the significance test because the multi-stage
-reconstruction (network inversion + spatial interpolation + temporal
-alignment) has its own real, non-adversarial precision floor of a few
-centimeters at some stations; requiring both conditions avoids excluding
-ordinary reconstruction imprecision while still catching a station with an
-actual centimeter-per-month-scale unmodeled drift.
+A single McTigue (1987) finite spherical source -- location (x0, y0),
+depth, radius, and a two-segment (unknown breakpoint) volume-rate history
+-- is fit by nonlinear least squares (`scipy.optimize.least_squares`, trust
+-region-reflective, box-bounded) against a stacked, weighted residual
+vector: every retained GNSS station's full (E, N, U) record (weighted by
+its own disclosed per-epoch sigma) plus a near-source sample of the
+now-corrected InSAR LOS pixels from both tracks (weighted by each track's
+own pooled reconstruction-noise estimate from step 3).
 
-The remaining stations' residual *intercepts* (their reference-frame
-offset, net of any drift) are fit with a planar ramp `a + b*x + c*y` via
-ordinary least squares. This ramp is then subtracted from the InSAR field
-everywhere, bringing it into the GNSS network's absolute reference frame --
-this is the step that lets the final InSAR-vs-GNSS comparison be
-meaningful at all, rather than dominated by an arbitrary per-track
-reference offset.
+The breakpoint day is included as a continuous 7th parameter (not a
+discrete grid search) so the final Jacobian captures its sensitivity too.
+Fitting proceeds in two passes: a GNSS-only pass (multi-started over
+several breakpoint-day initial guesses) gives a first location estimate;
+the near-field InSAR sample is then drawn from around that estimate and
+folded in for a second, refined pass. The initial (x0, y0) guess itself is
+a displacement-magnitude-weighted centroid of the retained stations --
+stations with negligible signal contribute negligible weight, which lets a
+generic starting point find the source without hardcoding which stations
+are "near-field."
 
-## 6. Two-segment rate-change fit and the control-zone check
+95% confidence intervals use the delta method: the covariance of the
+7 fitted parameters comes from `(J^T J)^-1` at the final solution's
+Jacobian (residuals are already whitened by construction), and any derived
+quantity (the vertical rate at a named station, cumulative displacement)
+gets its own CI via a numerical gradient of that quantity with respect to
+all 7 parameters, propagated through the same covariance matrix.
 
-At the primary near-source station, the GNSS record and the corrected
-InSAR-derived vertical series (pooled across both tracks' available
-epochs) are combined into one weighted dataset and fit with a two-segment
-linear model (unknown breakpoint) via grid search over the breakpoint day
-(5-day steps) plus weighted linear least squares for the segment rates at
-each candidate breakpoint. The same combined-series construction, but with
-a single (not two-segment) linear fit, is applied at a designated far-field
-station to produce the control-zone cumulative-displacement check --
-if the rate-change model were (incorrectly) extrapolated to the far field,
-or if noise were mistaken for signal there, this number would be far larger
-than the true near-zero far-field signal.
+## 6. Final reconciliation
 
-95% confidence intervals for the rate-change parameters come from a
-parametric bootstrap: synthetic residual noise is redrawn from each
-observation's own estimated sigma (GNSS's disclosed formal uncertainty;
-InSAR's pooled reconstruction-noise floor), and the full breakpoint-grid-
-search-plus-refit is repeated per replicate.
+The corrected per-track LOS field is compared against each retained
+station's own GNSS record (projected into that track's geometry) at the
+overlapping epochs, and the pooled RMSE across both tracks and all
+retained stations is reported as the final InSAR/GNSS reconciliation
+check.
 
-## 7. Final reconciliation
+## Calibration (eight independent noise realizations, same scenario)
 
-The corrected InSAR-derived vertical series is compared against each
-retained station's own GNSS record at the overlapping epochs, and the
-pooled RMSE across all retained stations is reported as the final
-InSAR/GNSS reconciliation check.
-
-## Calibration (six independent noise realizations, same scenario)
-
-The reference solution was re-run against six independent synthetic
-realizations of the same scenario (generator seeds 1, 7, 13, 42, 99, 202 --
-different atmospheric/GNSS noise draws and decorrelation masks, same true
+The reference solution was re-run against eight independent synthetic
+realizations of the same scenario (generator seeds 1, 7, 13, 42, 99, 202,
+555, 777 -- different noise draws and decorrelation masks, same true
 source/rates/stations). Seed 13 is the seed shipped as the task's public
 data and answer key.
 
-| seed | rate-before err | rate-after err | rate-change-day err | cumulative err | control est. (true 1.57 mm) | GNSS excluded | unwrap flagged |
-|---|---|---|---|---|---|---|---|
-| 1   | 1.36% | 2.05% | 0 d | 0.98% | 2.98 mm | GNSS-03 | ASC-02, DESC-07 |
-| 7   | 3.75% | 1.00% | 5 d | 0.71% | -0.65 mm | GNSS-03 | ASC-02, DESC-07 |
-| 13  | 0.24% | 0.78% | 0 d | 0.61% | 1.62 mm | GNSS-03 | ASC-02, DESC-07 |
-| 42  | 5.16% | 0.03% | 5 d | 0.55% | 0.46 mm | GNSS-03 | ASC-02, DESC-07 |
-| 99  | 1.71% | 0.24% | 0 d | 0.70% | 0.74 mm | GNSS-03 | ASC-02, DESC-07 |
-| 202 | 3.70% | 2.18% | 5 d | 1.53% | 0.23 mm | GNSS-03, GNSS-04, GNSS-05 | ASC-02, DESC-07 |
+| seed | x0 err (m) | y0 err (m) | depth err | radius err | rate-before err | rate-after err | t_break err | cumulative err | GNSS excluded | unwrap flagged |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1   | 4.0  | 10.1 | 5.23% | 8.85%  | 5.27% | 0.07% | 2.0 d | 1.16% | GNSS-03 | ASC-02, DESC-07 |
+| 7   | 14.2 | 12.6 | 2.90% | 10.17% | 3.60% | 1.29% | 0.3 d | 0.17% | GNSS-03 | ASC-02, DESC-07 |
+| 13  | 18.4 | 2.5  | 1.41% | 4.93%  | 2.96% | 2.03% | 4.1 d | 1.34% | GNSS-03 | ASC-02, DESC-07 |
+| 42  | 2.0  | 1.1  | 0.54% | 26.25% | 0.03% | 0.91% | 2.9 d | 0.01% | GNSS-03 | ASC-02, DESC-07 |
+| 99  | 2.1  | 24.5 | 3.64% | 21.13% | 7.08% | 1.11% | 6.3 d | 0.14% | GNSS-03 | ASC-02, DESC-07 |
+| 202 | 52.9 | 0.2  | 0.11% | 95.00% | 0.56% | 3.27% | 3.2 d | 2.76% | GNSS-03, GNSS-05 | ASC-02, DESC-07 |
+| 555 | 1.8  | 52.1 | 1.07% | 9.93%  | 3.21% | 0.11% | 2.5 d | 0.52% | GNSS-03 | ASC-02, DESC-07 |
+| 777 | 13.5 | 25.0 | 6.32% | 35.11% | 7.04% | 1.48% | 3.6 d | 0.43% | GNSS-03 | ASC-02, DESC-07 |
 
 Point-estimate tolerances in `tests/test_outputs.py` are set at roughly a
-3-5x margin over the largest error observed here (e.g. 20% vs. the observed
-5.16% max for the pre-change rate; 20 days vs. the observed 5-day max for
-the change day). The genuinely defective interferograms (ASC-02, DESC-07)
-and GNSS station (GNSS-03) are correctly identified in every realization.
-Seed 202 additionally excludes two legitimately good mid-field stations
-(GNSS-04, GNSS-05) whose own reconstruction noise happened to cross the
-drift-detection threshold in that particular noise draw; the verifier's
-GNSS-exclusion check accordingly requires only that the known-bad station
-is included and caps the total excluded count (4), rather than requiring an
-exact match -- a stricter check would not survive the reference solution's
-own honest seed-to-seed variability.
+3-5x margin over the largest error observed here for every quantity except
+radius (see below). The genuinely defective interferograms (ASC-02,
+DESC-07) and GNSS station (GNSS-03) are correctly identified in every
+realization; seed 202 additionally excludes one legitimately good
+mid-field station (GNSS-05) whose own reconstruction noise happened to
+cross the drift-detection threshold in that particular noise draw -- the
+verifier's GNSS-exclusion check accordingly requires only that the
+known-bad station is included and caps the total excluded count, rather
+than requiring an exact match.
 
-CI widths (as a fraction of the point estimate, or in days for the change
-day) across the six seeds: rate-before 8.5-12.4%, rate-after 3.6-5.0%,
-rate-change-day 10-15 days, cumulative displacement 2.1-2.7%. The verifier's
-maximum-width sanity caps sit at roughly 3-4x these observed maxima, wide
-enough to accept a more conservative but still genuine uncertainty method
-without accepting a degenerate, uninformatively wide interval.
+**Radius is only weakly identified by this data.** Seed 202 pins the
+fitted radius at its search-space lower bound (50 m vs. a true 1000 m, a
+95% error) while every other fitted quantity in that same seed lands
+well within tolerance -- a textbook sign of a flat/degenerate direction in
+the parameter space, not a broken fit. The delta-method CI correctly
+reflects this: in that seed it reports a width of about 49,000 m, two
+orders of magnitude wider than the ~50-130 m widths seen in well-behaved
+seeds. Because the correction radius mostly enters as a small (order
+5-25%) perturbation on top of an otherwise Mogi-like field, and the other
+six free parameters (especially depth and both rates) can substantially
+compensate for a misjudged radius without a large cost in fit quality, no
+point-estimate tolerance on radius would both (a) accept this reference
+solution's own honest behavior across all eight seeds and (b) be tight
+enough to mean anything. `radius_m` is therefore checked only for format,
+physical plausibility (0 < radius < depth), and CI self-consistency --
+the same treatment this task gives other outputs where only the shape of
+the answer, not its precise value, is verified.
 
-The verifier was also checked against seven deliberately bad submissions
-(equal before/after rates with no acceleration, a maximally wide CI, all
-stations excluded, no unwrapping correction reported, the known-bad station
-left in, the control zone reported with the same magnitude as the volcano
-signal, and an uncorrected InSAR-GNSS RMSE) -- every one is correctly
-rejected.
+## Ablations run to validate (not just assert) where the difficulty lives
+
+Three specific "an agent might take a shortcut here" hypotheses were each
+tested directly, by deliberately breaking one mechanism and comparing the
+result against the properly-implemented pipeline on the same seed-13
+data. Two did not hold up under measurement; one did, and the pipeline
+described above reflects that finding.
+
+- **McTigue vs. a pure-Mogi fit (radius pinned near zero).** Refitting the
+  remaining 6 parameters with radius fixed at 55 m produced x0/y0/depth
+  errors of the same order as the full McTigue fit (in some cases
+  slightly better on individual quantities), because the other free
+  parameters compensate for the missing near-field correction. This
+  hypothesis is not supported by evidence and is not relied upon as a
+  difficulty mechanism here.
+- **Equal-weighting vs. per-station-sigma-weighting the GNSS data in the
+  joint inversion.** With ~9 stations and ~1,400 near-field InSAR
+  observations feeding one nonlinear fit, two stations reporting
+  4-5x-elevated (but unbiased) noise did not have enough leverage to
+  meaningfully change the result either way. Also not relied upon.
+- **Equal-weighting vs. per-station-sigma-weighting the planar RAMP fit**
+  (step 4). This one held up: on seed 13, x0 error dropped from 48.0 m
+  (equal-weighted ramp) to 18.4 m (properly weighted), and the primary
+  station's pre-breakpoint rate error dropped from 6.77% to 2.96% -- both
+  roughly a 2-3x improvement. Unlike the joint inversion, the ramp fit has
+  very little redundancy (about 9 points, 3 parameters), so a noisy
+  station given equal weight there has real leverage. This is the
+  validated reason `fit_ramp` in `solve.py` is a weighted, not ordinary,
+  least-squares fit, and it is the mechanism the noisy near-field stations
+  (GNSS-09, GNSS-10) are actually included to exercise.
+
+The honest upshot: the task's difficulty does not rest on a single
+dramatic "gotcha." It rests on getting several smaller, individually
+modest-but-real judgment calls right at once (loop-closure arbitration,
+per-track LOS-domain correction, weighted ramp fitting, honest treatment
+of a weakly-identified parameter) well enough that the cumulative result
+lands inside the calibrated tolerances above.
 
 ## Two known implementation pitfalls found and fixed during development
 
@@ -187,14 +217,18 @@ rejected.
   set (a graph reachability check) and leaving the rest `NaN`.
 - **Inverse-distance interpolation biased low near the source.** A plain
   IDW average from a sparse, uniformly-scattered point cloud systematically
-  underestimated the near-source stations' true signal by 30-60%, which
-  showed up indirectly as an apparently "drifting" GNSS station where none
-  existed -- the interpolation error itself grows over time in proportion
-  to the (also time-varying) true signal, mimicking exactly the kind of
-  trend the GNSS quality screen in step 5 is designed to catch. Diagnosed
-  by reconstructing the InSAR-derived series at a near-source station and
+  underestimated the near-source stations' true signal, which showed up
+  indirectly as an apparently "drifting" GNSS station where none existed --
+  the interpolation error itself grows over time in proportion to the
+  (also time-varying) true signal, mimicking exactly the kind of trend the
+  GNSS quality screen in step 4 is designed to catch. Diagnosed by
+  reconstructing the InSAR-derived series at a near-source station and
   comparing directly against the true model rather than only against GNSS
   (which has its own noise and could not by itself distinguish "GNSS is
   drifting" from "InSAR reconstruction is biased"). Fixed by switching to a
   local first-order (planar) interpolant, which is unbiased to first order
-  for a smoothly curving field.
+  for a smoothly curving field, and later compounded by discovering (via
+  the same true-vs-reconstructed comparison) that combining ascending and
+  descending into vertical *before* correcting each track's own reference
+  offset was a second, related error -- fixed by moving the GNSS
+  reconciliation into each track's native LOS domain (step 4 above).

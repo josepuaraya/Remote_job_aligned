@@ -7,7 +7,9 @@
     "GNSS-05",
     "GNSS-06",
     "GNSS-07",
-    "GNSS-08"
+    "GNSS-08",
+    "GNSS-09",
+    "GNSS-10"
   ],
   "all_interferogram_ids": [
     "ASC-01",
@@ -66,14 +68,15 @@
   "persistent_hole_track": "descending",
   "poisson_ratio": 0.25,
   "primary_station_id": "GNSS-01",
-  "true_cumulative_vertical_displacement_m_control": 0.0015744458054472888,
-  "true_cumulative_vertical_displacement_m_primary": 0.22039833152924768,
+  "true_cumulative_vertical_displacement_m_control": 0.0015643093057229945,
+  "true_cumulative_vertical_displacement_m_primary": 0.2348584988758851,
   "true_depth_m": 2500.0,
+  "true_radius_m": 1000.0,
   "true_rate1_dv_m3_per_day": 11000.0,
   "true_rate2_dv_m3_per_day": 24200.0,
   "true_rate_change_day": 165.0,
-  "true_vertical_rate_after_m_per_day_primary": 0.0009183263813718652,
-  "true_vertical_rate_before_m_per_day_primary": 0.00041742108244175694,
+  "true_vertical_rate_after_m_per_day_primary": 0.0009785770786495214,
+  "true_vertical_rate_before_m_per_day_primary": 0.0004448077630225097,
   "true_x0_m": 150.0,
   "true_y0_m": -80.0,
   "unwrap_defect_interferograms": [

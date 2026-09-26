@@ -24,19 +24,26 @@ same edifice over an ~11-month episode:
      (missing pixels), and -- for the descending track only -- a
      persistent no-data zone near the summit (a permanent layover/
      foreshortening blind spot for that look geometry).
-  2. An 8-station continuous GNSS network with heterogeneous quality: two
-     stations sit close to the source, one of those two is quietly
-     drifting from an unrelated local cause (not flagged by its own
-     formal uncertainty), two mid-field stations have incomplete time
-     coverage (one deployed late, one that failed early), and three
-     far-field stations sample ground with no meaningful volcanic signal
-     at all (a built-in control region).
+  2. A 10-station continuous GNSS network with heterogeneous quality:
+     three stations sit close to the source (one of them quietly
+     drifting from an unrelated local cause, not flagged by its own
+     formal uncertainty; two more sit near the source but are
+     genuinely noisy -- large, honestly-reported uncertainty, no
+     hidden bias -- so a station that reports itself as imprecise
+     still has to be used, just down-weighted, not thrown away), two
+     mid-field stations have incomplete time coverage (one deployed
+     late, one that failed early), and three far-field stations sample
+     ground with no meaningful volcanic signal at all (a built-in
+     control region).
 
-The true source is a single Mogi (1958) point source whose volume-change
-rate is NOT constant: it inflates at one linear rate, then -- partway
-through the record, at an undisclosed day -- switches to a second, faster
-linear rate. This is the realistic, consequential signal the workflow
-must recover: has the inflation rate changed, by how much, and when.
+The true source is a single McTigue (1987) finite spherical source (a
+second-order refinement of the Mogi point source that accounts for the
+source's own finite radius -- non-negligible here, at radius/depth = 0.4)
+whose volume-change rate is NOT constant: it inflates at one linear rate,
+then -- partway through the record, at an undisclosed day -- switches to
+a second, faster linear rate. This is the realistic, consequential signal
+the workflow must recover: where the source is, has its inflation rate
+changed, by how much, and when.
 
 The generator's true parameters (source location/depth, both rates, the
 rate-change day, which stations/interferograms are defective, ramp
@@ -72,6 +79,7 @@ PRIVATE_DATA_DIR = os.environ.get(
 TRUE_X0_M = 150.0
 TRUE_Y0_M = -80.0
 TRUE_DEPTH_M = 2500.0
+TRUE_RADIUS_M = 1000.0  # finite spherical source radius (McTigue); a/d = 0.4
 POISSON_RATIO = 0.25
 
 N_DAYS = 331  # days 0..330 inclusive
@@ -101,13 +109,27 @@ def cumulative_dV(day):
     return np.where(day <= TRUE_RATE_CHANGE_DAY, before, after)
 
 
-def mogi_displacement(x, y, depth, delta_v_m3, x0=TRUE_X0_M, y0=TRUE_Y0_M, nu=POISSON_RATIO):
+def mctigue_displacement(x, y, depth, delta_v_m3, radius=TRUE_RADIUS_M,
+                          x0=TRUE_X0_M, y0=TRUE_Y0_M, nu=POISSON_RATIO):
+    """McTigue (1987) finite spherical source, 2nd-order series in a/depth.
+
+    Formula verified against the open-source VSM toolkit (Trasatti,
+    github.com/EliTras/VSM, VSM_forward.py:mctigue), which implements
+    McTigue (1987) directly. As radius -> 0 this reduces exactly to the
+    Mogi point-source result with dV = pi * radius**3 * (dP/mu), the
+    standard pressure/volume relation for a pressurized sphere -- a
+    useful internal consistency check on the formula itself.
+    """
     dx, dy = x - x0, y - y0
-    r = np.sqrt(dx ** 2 + dy ** 2)
-    R = np.sqrt(r ** 2 + depth ** 2)
-    C = (1 - nu) * delta_v_m3 / np.pi
-    u_z = C * depth / R ** 3
-    u_r = C * r / R ** 3
+    rho = np.sqrt(dx ** 2 + dy ** 2)
+    R = np.sqrt(rho ** 2 + depth ** 2)
+    dP_mu = delta_v_m3 / (np.pi * radius ** 3)
+    a_d = radius / depth
+    f1 = (depth ** 3) / (R ** 3)
+    c1 = a_d ** 3 / (7.0 - 5.0 * nu)
+    uzbar = a_d ** 3 * (1 - nu) * f1 * (1 - c1 * (0.5 * (1 + nu) - 3.75 * (2 - nu) * f1))
+    u_z = uzbar * dP_mu * depth
+    u_r = u_z * (rho / depth)
     theta = np.arctan2(dy, dx)
     u_x = u_r * np.cos(theta)
     u_y = u_r * np.sin(theta)
@@ -255,8 +277,8 @@ def build_edges(epoch_days):
 
 def make_ifg_los(x, y, day0, day1, incidence_deg, heading_deg):
     dV0, dV1 = cumulative_dV(day0), cumulative_dV(day1)
-    ux0, uy0, uz0 = mogi_displacement(x, y, TRUE_DEPTH_M, dV0)
-    ux1, uy1, uz1 = mogi_displacement(x, y, TRUE_DEPTH_M, dV1)
+    ux0, uy0, uz0 = mctigue_displacement(x, y, TRUE_DEPTH_M, dV0)
+    ux1, uy1, uz1 = mctigue_displacement(x, y, TRUE_DEPTH_M, dV1)
     return los_projection_full(ux1 - ux0, uy1 - uy0, uz1 - uz0, incidence_deg, heading_deg)
 
 
@@ -333,6 +355,8 @@ GNSS_STATIONS = [
     ("GNSS-06", 11000.0,  5000.0,   0, 330, 0.0025, 0.006, 0.0),        # far control
     ("GNSS-07",-12000.0, -4000.0,   0, 330, 0.0025, 0.006, 0.0),        # far control (primary)
     ("GNSS-08", 10000.0, -8000.0,   0, 330, 0.0050, 0.011, 0.0),        # far control, noisier
+    ("GNSS-09",  -400.0,   700.0,   0, 330, 0.0120, 0.0250, 0.0),       # near-field, genuinely noisy (unbiased)
+    ("GNSS-10",   600.0,  -500.0,   0, 330, 0.0120, 0.0250, 0.0),       # near-field, genuinely noisy (unbiased)
 ]
 
 GNSS_COMMON_MODE_SIGMA_EN_M = 0.0018
@@ -348,7 +372,7 @@ gnss_records = []
 for sid, sx, sy, d0, d1, sig_en, sig_up, drift_up in GNSS_STATIONS:
     for day in range(d0, d1 + 1):
         dV = cumulative_dV(day)
-        ux, uy, uz = mogi_displacement(np.array([sx]), np.array([sy]), TRUE_DEPTH_M, dV)
+        ux, uy, uz = mctigue_displacement(np.array([sx]), np.array([sy]), TRUE_DEPTH_M, dV)
         wn = RNG.standard_normal(3)
         cm_e, cm_n = common_mode[day]
         cm_u = common_mode_up[day]
@@ -370,15 +394,15 @@ control_x, control_y = -12000.0, -4000.0  # GNSS-07
 
 def true_cumulative_vertical(x, y, day_start, day_end):
     dV0, dV1 = cumulative_dV(day_start), cumulative_dV(day_end)
-    _, _, uz0 = mogi_displacement(np.array([x]), np.array([y]), TRUE_DEPTH_M, dV0)
-    _, _, uz1 = mogi_displacement(np.array([x]), np.array([y]), TRUE_DEPTH_M, dV1)
+    _, _, uz0 = mctigue_displacement(np.array([x]), np.array([y]), TRUE_DEPTH_M, dV0)
+    _, _, uz1 = mctigue_displacement(np.array([x]), np.array([y]), TRUE_DEPTH_M, dV1)
     return float(uz1[0] - uz0[0])
 
 
-true_rate_before_primary = mogi_displacement(
+true_rate_before_primary = mctigue_displacement(
     np.array([primary_x]), np.array([primary_y]), TRUE_DEPTH_M, np.array([TRUE_RATE1_DV_M3_PER_DAY])
 )[2][0]
-true_rate_after_primary = mogi_displacement(
+true_rate_after_primary = mctigue_displacement(
     np.array([primary_x]), np.array([primary_y]), TRUE_DEPTH_M, np.array([TRUE_RATE2_DV_M3_PER_DAY])
 )[2][0]
 
@@ -387,6 +411,7 @@ answer_key = {
     "true_x0_m": TRUE_X0_M,
     "true_y0_m": TRUE_Y0_M,
     "true_depth_m": TRUE_DEPTH_M,
+    "true_radius_m": TRUE_RADIUS_M,
     "poisson_ratio": POISSON_RATIO,
     "n_days": N_DAYS,
     "true_rate_change_day": TRUE_RATE_CHANGE_DAY,
