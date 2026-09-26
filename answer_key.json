@@ -6,15 +6,19 @@
   "true_cumulative_delta_v_m3": 76340701.48223197,
   "onset_day": 60,
   "unrepairable_interferograms": [
-    "ASC-04"
+    "ASC-01",
+    "ASC-06",
+    "DESC-02"
   ],
   "repairable_interferograms": [
-    "ASC-01",
-    "ASC-02"
+    "ASC-04",
+    "DESC-01",
+    "DESC-05"
   ],
   "clean_interferograms": [
+    "ASC-02",
     "ASC-03",
-    "ASC-06"
+    "DESC-04"
   ],
   "gps_location_m": {
     "x_m": 900.0,
@@ -47,7 +51,8 @@
     }
   ],
   "unwrap_jump_interferograms": [
-    "ASC-05"
+    "ASC-05",
+    "DESC-03"
   ],
   "unwrap_jump_size_m": 0.028,
   "unwrap_jump_affected_point_ids": [
