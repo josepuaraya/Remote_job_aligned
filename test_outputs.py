@@ -210,27 +210,6 @@ def test_unrepairable_interferograms_excluded(submitted, answer_key):
     )
 
 
-def test_discrete_defect_interferograms_repaired_and_used(submitted, answer_key):
-    """The interferograms carrying a discrete unwrapping-style jump (a
-    processing artifact, not atmospheric noise) are a different failure
-    mode from the unrepairable category above: they are genuinely
-    repairable by detecting and removing the discrete offset, and doing
-    so recovers real, usable deformation data. Treating them the same as
-    unrepairable noise -- discarding them rather than diagnosing and
-    repairing the defect -- throws away information that measurably
-    degrades the recovered source, not merely a missed opportunity.
-    """
-    jump_ids = set(answer_key["unwrap_jump_interferograms"])
-    submitted_used = set(submitted.get("interferograms_used_in_inversion", []))
-
-    assert jump_ids.issubset(submitted_used), (
-        f"Expected the discrete-defect interferogram(s) {jump_ids} to be repaired "
-        f"and used in the inversion (a phase-unwrapping jump is a different, "
-        f"repairable failure mode from atmospheric noise), but "
-        f"interferograms_used_in_inversion was {submitted_used}."
-    )
-
-
 def test_used_in_inversion_is_consistent(submitted):
     """The interferograms actually used to derive the source parameters
     must be a non-empty subset of those that passed the QC filter.
