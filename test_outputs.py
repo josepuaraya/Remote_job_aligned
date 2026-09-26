@@ -64,7 +64,7 @@ REQUIRED_KEYS = {
     "vertical_east_west_decomposition_sample",
 }
 
-ALL_IDS = {f"ASC-{i:02d}" for i in range(1, 7)} | {f"DESC-{i:02d}" for i in range(1, 6)}
+ALL_IDS = {f"ASC-{i:02d}" for i in range(1, 7)}  # v15: single ascending track only
 
 # Tolerances -- calibrated against 3 independent noise realizations of the
 # author's own reference solution.
@@ -77,7 +77,7 @@ ALL_IDS = {f"ASC-{i:02d}" for i in range(1, 7)} | {f"DESC-{i:02d}" for i in rang
 LOCATION_ERROR_TOL_M = 200.0       # InSAR-only geometry under-resolves x0,y0 tightly
 DEPTH_REL_TOL = 0.10               # InSAR-only geometry under-resolves depth tightly
 VOLUME_REL_TOL = 0.10              # correlated with depth via the trade-off above
-MAX_EXCLUDED_COUNT = 6              # observed 3-4 (true unrepairable=3, plus occasional conservative extra) across 5 seeds, with 11 total interferograms
+MAX_EXCLUDED_COUNT = 3              # observed 1-2 (true unrepairable=1, plus occasional conservative extra) across 5 seeds, with 6 total interferograms (v15: single ascending track only)
 
 # GPS reconciliation has two independent checks with different jobs:
 # - Self-consistency is the primary, robust check: it is pure arithmetic

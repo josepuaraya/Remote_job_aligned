@@ -1,6 +1,39 @@
 """
 generate_insar_data.py -- ground-truth data generator for the
-insar-volcano-inversion task (v12).
+insar-volcano-inversion task (v15).
+
+v15 change: real trajectory-review evidence showed Codex now clearing the
+task cleanly (4/4, no genuine failures) after several rounds of data-volume
+and coverage levers (interferogram count, per-interferogram decorrelation,
+near-source coherence loss) that all hit the same wall: with two tracks
+plus a 3-station GNSS network, the joint inversion is structurally very
+robust to losing InSAR data almost anywhere, so no single mistake costs
+enough to fail. Rather than another data-volume tweak, this removes the
+descending track entirely. A single LOS track cannot resolve the full 3D
+deformation vector on its own (this is real, well-known InSAR geometry,
+not a synthetic difficulty dial) -- with two tracks, the ascending and
+descending look directions jointly constrain the horizontal and vertical
+components; with only one, GNSS stops being a nice-to-have cross-check and
+becomes load-bearing for breaking the depth/volume/location degeneracy.
+Validated directly: dropping the second track roughly triples the cost of
+skipping GNSS in the final inversion (worst-case InSAR-only location
+error rose from ~44m to ~118m of a 200m budget, with the same underlying
+mistake), and a realistic stacked mistake (skip the discrete-defect
+diagnosis AND skip GNSS -- both individually plausible slips, not a
+strawman) pushes location error to 341m on one calibration seed,
+decisively over tolerance, while the correctly-gated, properly-weighted
+method stays safe at 50.7m worst case across all 5 seeds. Tested down to
+3 remaining ascending interferograms before finding the point where even
+the correct method starts to fail (204m on one seed) -- 6 kept (the full
+original ascending track, unchanged) leaves real margin on the correct
+side while still making individual judgment calls costly. Category
+allocation is rebalanced for 6 total interferograms instead of 11 (2
+clean / 2 repairable / 1 unrepairable / 1 unwrap_jump); the ascending
+track's own asymmetric acquisition schedule (the genuine 70-day gap) is
+unchanged. The reference solution's own logic (solve.py) needed no
+changes beyond restricting SEQUENTIAL_IDS -- the per-interferogram,
+per-point covariance machinery already treats each interferogram
+independently.
 
 v12 change: real trajectory-review evidence (v11) showed Claude still
 clearing the task cleanly (0 genuine failures of 4), correctly repairing
@@ -186,34 +219,35 @@ count suggests.
   (a standard real GNSS network effect -- e.g. reference-frame or orbit
   error -- normally removed by common-mode stacking across the network).
 
-11 interferograms: 6 ascending, 5 descending, deliberately asymmetric
-between tracks. Ascending keeps a varying-duration structure including a
-genuine ~70-day gap with no coverage at all; descending is evenly
-sampled with no such gap, so an agent cannot assume the two tracks are
-structurally alike -- a realistic SBAS-style stack, not a dense
-continuous time series.
+6 interferograms, a single ascending track only (v15: the descending
+track was removed -- see the v15 changelog note above for why). The
+track keeps its varying-duration structure, including a genuine ~70-day
+gap with no coverage at all -- a realistic SBAS-style stack from one
+look direction, not a dense continuous time series and not a pair of
+complementary geometries.
 
-Ascending geometry: incidence=39.1054 deg, heading=-11.876832 deg.
-Descending geometry: incidence=39.1840 deg, heading=-168.27934 deg.
-(Real geometry values from the author's own prior fieldwork in Iceland.)
+Geometry: incidence=39.1054 deg, heading=-11.876832 deg. (Real geometry
+values from the author's own prior fieldwork in Iceland.) With only one
+look direction, this single LOS projection cannot by itself separate the
+full east/north/vertical deformation vector -- the GNSS network is the
+only source of genuinely independent 3-component displacement here.
 
-Noise model, 3/3/3/2 split across the 11 interferograms:
-- 3 "clean": spatially correlated baseline noise only.
-- 3 "repairable": spatially correlated baseline noise PLUS an
+Noise model, 2/2/1/1 split across the 6 interferograms:
+- 2 "clean": spatially correlated baseline noise only.
+- 2 "repairable": spatially correlated baseline noise PLUS an
   elevation-correlated linear term (simulating tropospheric delay
   correlated with topography), correctable via a phase-vs-elevation
   regression.
-- 3 "unrepairable": spatially correlated baseline noise PLUS a
+- 1 "unrepairable": spatially correlated baseline noise PLUS a
   large-amplitude, SHORT-correlation-length rough field NOT correlated
   with elevation (simulating turbulent atmospheric noise whose spatial
   frequency content resists any smooth/low-order correction) -- must be
   excluded.
-- 2 "unwrap_jump": spatially correlated baseline noise PLUS a discrete
+- 1 "unwrap_jump": spatially correlated baseline noise PLUS a discrete
   offset affecting only part of the footprint (an unwrapping-style
-  defect), one per track, each fixed to a substantially post-onset
-  window -- a different failure mode from atmospheric noise, correctable
-  by detecting and removing the discrete offset, and must be repaired
-  and kept rather than excluded.
+  defect), fixed to a substantially post-onset window -- a different
+  failure mode from atmospheric noise, correctable by detecting and
+  removing the discrete offset.
 
 Points are NOT a dense pixel grid but a quasi-random sample of ~700
 points within the domain, matching the standard real-world practice of
@@ -244,12 +278,11 @@ TRUE_DV_RATE_M3_PER_DAY = (
 )
 
 # ---------------------------------------------------------------------------
-# Geometry (author's own values from Iceland fieldwork)
+# Geometry (author's own values from Iceland fieldwork). v15: single
+# ascending track only -- see the v15 changelog note for why.
 # ---------------------------------------------------------------------------
 ASC_INCIDENCE_DEG = 39.1054
 ASC_HEADING_DEG = -11.876832
-DESC_INCIDENCE_DEG = 39.1840
-DESC_HEADING_DEG = -168.27934
 
 # ---------------------------------------------------------------------------
 # Spatial sampling: ~700 quasi-random points (downsampled InSAR product),
@@ -345,61 +378,35 @@ def los_projection_reduced(u_e, u_u, incidence_deg, heading_deg):
 
 
 # ---------------------------------------------------------------------------
-# Build acquisition date lists (independent per track). Deliberately
-# asymmetric between tracks, and deliberately fewer than earlier versions:
-# with 20 total interferograms there was enough redundant data that losing
-# a handful to a QC mistake barely dented the final answer for a
-# reasonably competent method, not just this task's own reference
-# implementation -- real trajectory evidence confirmed this directly.
-# Ascending keeps the varying-duration structure (including the genuine
-# 70-day gap); descending is evenly sampled with no such gap, so an agent
-# cannot assume symmetry between the two tracks.
+# Build the acquisition date list. v15: a single ascending track only (see
+# the v15 changelog note) -- this keeps the same varying-duration
+# structure and genuine ~70-day gap that existed before; only the second
+# (descending) track is gone, not this track's own internal asymmetry.
 # ---------------------------------------------------------------------------
 asc_dates = np.concatenate([
     np.linspace(0, 140, 4), np.linspace(210, N_DAYS - 1, 3)
 ]).astype(int)  # 70-day gap (140-210), 7 dates -> 6 interferograms
-desc_dates = np.linspace(6, N_DAYS - 7, 6).astype(int)  # evenly sampled, 6 dates -> 5 interferograms, no gap
 
 asc_pairs = [(asc_dates[i], asc_dates[i + 1]) for i in range(len(asc_dates) - 1)]
-desc_pairs = [(desc_dates[i], desc_dates[i + 1]) for i in range(len(desc_dates) - 1)]
 
 # The discrete unwrapping-jump defect is deliberately NOT placed by the
-# random shuffle below, and there are deliberately three of them, not one.
-# Reasoning: if placement were left to chance, a jump interferogram can
-# land on a purely pre-onset window (zero true deformation signal, so
-# discarding it costs nothing), making "was it correctly repaired and
-# kept" a meaningless, seed-dependent test on some seeds. And even placed
-# well, a single jump interferogram is only one data point among the
-# ~14 otherwise-usable ones -- discarding just that one has a small,
-# noise-dominated effect on the final point estimate that can go either
-# way run to run, which is not a fair basis for a hard requirement.
-# Three, all placed on substantially post-onset, non-gap windows, means
-# an agent that defaults to excluding anything that looks off (rather
-# than diagnosing and repairing a genuine discrete artifact) discards a
-# large, consistent fraction of the usable data, not a coin flip -- this
-# was validated across 5 calibration seeds: excluding all three instead
-# of repairing them makes the reported volume change meaningfully worse
-# on the large majority of seeds (depth is a bit more mixed, consistent
-# with this task's already-acknowledged depth/volume trade-off).
-# Deliberately avoids the 70-day-gap-spanning ascending interferogram
-# (slot index 3) -- that window already carries its own, separate
-# difficulty (proportionally more information about the unobserved gap),
-# and stacking the jump defect onto it too would conflate two distinct
-# scientific judgment calls into the same interferogram. One jump
-# interferogram per track (not concentrated on one track), each on a
-# substantially post-onset window: ascending slot 4 (day 210-287) and
-# descending slot 2 (day ~147-217).
+# random shuffle below. Reasoning: if placement were left to chance, the
+# jump interferogram can land on a purely pre-onset window (zero true
+# deformation signal, so discarding it costs nothing), making "was it
+# correctly diagnosed" a meaningless, seed-dependent test on some seeds.
+# Deliberately avoids the 70-day-gap-spanning interferogram (slot index
+# 3) -- that window already carries its own, separate difficulty
+# (proportionally more information about the unobserved gap), and
+# stacking the jump defect onto it too would conflate two distinct
+# scientific judgment calls into the same interferogram. Slot 4 (day
+# 210-287) is substantially post-onset and outside the gap window.
 UNWRAP_JUMP_ASC_SLOTS = [4]
-UNWRAP_JUMP_DESC_SLOTS = [2]
 
-categories = ["clean"] * 3 + ["repairable"] * 3 + ["unrepairable"] * 3
+categories = ["clean"] * 2 + ["repairable"] * 2 + ["unrepairable"] * 1
 RNG.shuffle(categories)
-asc_categories = categories[:5]
-desc_categories = categories[5:]
+asc_categories = categories
 for slot in UNWRAP_JUMP_ASC_SLOTS:
     asc_categories.insert(slot, "unwrap_jump")
-for slot in UNWRAP_JUMP_DESC_SLOTS:
-    desc_categories.insert(slot, "unwrap_jump")
 
 # The elevation "volcano peak" (ELEV_PEAK_X_M, ELEV_PEAK_Y_M below) sits close
 # to the true source -- a realistic touch, since a volcano's own edifice
@@ -512,24 +519,6 @@ for i, (day0, day1) in enumerate(asc_pairs):
         "interferogram_id": ifg_id, "orbit": "ascending",
         "day_start": int(day0), "day_end": int(day1),
         "incidence_deg": ASC_INCIDENCE_DEG, "heading_deg": ASC_HEADING_DEG,
-        "true_category": cat,
-    })
-
-for i, (day0, day1) in enumerate(desc_pairs):
-    ifg_id = f"DESC-{i+1:02d}"
-    cat = desc_categories[i]
-    los_observed = make_interferogram(day0, day1, DESC_INCIDENCE_DEG, DESC_HEADING_DEG, cat)
-    for j in draw_decorrelation_mask():
-        records.append({
-            "interferogram_id": ifg_id, "point_id": j,
-            "x_m": round(x_pts[j], 2), "y_m": round(y_pts[j], 2),
-            "elevation_m": round(elevation_pts[j], 2),
-            "los_displacement_m": round(los_observed[j], 6),
-        })
-    answer_pairs.append({
-        "interferogram_id": ifg_id, "orbit": "descending",
-        "day_start": int(day0), "day_end": int(day1),
-        "incidence_deg": DESC_INCIDENCE_DEG, "heading_deg": DESC_HEADING_DEG,
         "true_category": cat,
     })
 

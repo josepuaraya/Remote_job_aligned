@@ -51,7 +51,7 @@ VAL_ID = "VAL-01"
 VARIOGRAM_MAX_LAG_M = 800.0
 VARIOGRAM_N_BINS = 10
 
-SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 7)] + [f"DESC-{i:02d}" for i in range(1, 6)]
+SEQUENTIAL_IDS = [f"ASC-{i:02d}" for i in range(1, 7)]  # v15: single ascending track only
 
 
 def load_data():
