@@ -38,10 +38,12 @@ REQUIRED_KEYS = {
     "vertical_rate_after_m_per_day",
     "rate_change_day",
     "cumulative_vertical_displacement_m",
+    "volume_change_m3",
     "vertical_rate_before_uncertainty_95",
     "vertical_rate_after_uncertainty_95",
     "rate_change_day_uncertainty_95",
     "cumulative_vertical_displacement_uncertainty_95",
+    "volume_change_uncertainty_95",
     "control_zone_cumulative_vertical_displacement_m",
     "insar_gnss_ramp_coefficients",
     "gnss_stations_used",
@@ -60,6 +62,7 @@ RATE_BEFORE_REL_TOL = 0.25
 RATE_AFTER_REL_TOL = 0.15
 RATE_CHANGE_DAY_ABS_TOL = 25.0
 CUMULATIVE_REL_TOL = 0.12
+VOLUME_CHANGE_REL_TOL = 0.40  # max observed across 8 seeds was 11.21%
 CONTROL_ABS_TOL_M = 0.010
 
 # CI sanity caps (max observed width/point-estimate ratio, or width in
@@ -70,6 +73,7 @@ RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.5
 RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.3
 RATE_CHANGE_DAY_CI_WIDTH_CAP = 80.0
 CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.15
+VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.10  # max observed width/point across 8 seeds was ~1.7%
 
 RADIUS_CI_WIDTH_SANITY_CAP_M = 2.0e5  # radius is weakly identified (see above) and a
 # genuinely honest CI can be tens of thousands of meters wide (observed up to ~50,000 m
@@ -192,6 +196,12 @@ def test_cumulative_displacement_within_tolerance(submitted, answer_key):
     _check_point_and_ci(submitted, "cumulative_vertical_displacement_m",
                          "cumulative_vertical_displacement_uncertainty_95", true_val,
                          rel_tol=CUMULATIVE_REL_TOL, ci_width_frac_cap=CUMULATIVE_CI_WIDTH_CAP_FRAC)
+
+
+def test_volume_change_within_tolerance(submitted, answer_key):
+    true_val = answer_key["true_volume_change_m3"]
+    _check_point_and_ci(submitted, "volume_change_m3", "volume_change_uncertainty_95", true_val,
+                         rel_tol=VOLUME_CHANGE_REL_TOL, ci_width_frac_cap=VOLUME_CHANGE_CI_WIDTH_CAP_FRAC)
 
 
 def test_control_zone_shows_no_meaningful_deformation(submitted, answer_key):

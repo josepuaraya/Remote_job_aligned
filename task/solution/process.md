@@ -123,16 +123,26 @@ realizations of the same scenario (generator seeds 1, 7, 13, 42, 99, 202,
 source/rates/stations). Seed 13 is the seed shipped as the task's public
 data and answer key.
 
-| seed | x0 err (m) | y0 err (m) | depth err | radius err | rate-before err | rate-after err | t_break err | cumulative err | GNSS excluded | unwrap flagged |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 1   | 4.0  | 10.1 | 5.23% | 8.85%  | 5.27% | 0.07% | 2.0 d | 1.16% | GNSS-03 | ASC-02, DESC-07 |
-| 7   | 14.2 | 12.6 | 2.90% | 10.17% | 3.60% | 1.29% | 0.3 d | 0.17% | GNSS-03 | ASC-02, DESC-07 |
-| 13  | 18.4 | 2.5  | 1.41% | 4.93%  | 2.96% | 2.03% | 4.1 d | 1.34% | GNSS-03 | ASC-02, DESC-07 |
-| 42  | 2.0  | 1.1  | 0.54% | 26.25% | 0.03% | 0.91% | 2.9 d | 0.01% | GNSS-03 | ASC-02, DESC-07 |
-| 99  | 2.1  | 24.5 | 3.64% | 21.13% | 7.08% | 1.11% | 6.3 d | 0.14% | GNSS-03 | ASC-02, DESC-07 |
-| 202 | 52.9 | 0.2  | 0.11% | 95.00% | 0.56% | 3.27% | 3.2 d | 2.76% | GNSS-03, GNSS-05 | ASC-02, DESC-07 |
-| 555 | 1.8  | 52.1 | 1.07% | 9.93%  | 3.21% | 0.11% | 2.5 d | 0.52% | GNSS-03 | ASC-02, DESC-07 |
-| 777 | 13.5 | 25.0 | 6.32% | 35.11% | 7.04% | 1.48% | 3.6 d | 0.43% | GNSS-03 | ASC-02, DESC-07 |
+| seed | x0 err (m) | y0 err (m) | depth err | radius err | rate-before err | rate-after err | t_break err | cumulative err | volume-change err | GNSS excluded | unwrap flagged |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1   | 4.0  | 10.1 | 5.23% | 8.85%  | 5.27% | 0.07% | 2.0 d | 1.16% | 11.21% | GNSS-03 | ASC-02, DESC-07 |
+| 7   | 14.2 | 12.6 | 2.90% | 10.17% | 3.60% | 1.29% | 0.3 d | 0.17% | 4.72%  | GNSS-03 | ASC-02, DESC-07 |
+| 13  | 18.4 | 2.5  | 1.41% | 4.93%  | 2.96% | 2.03% | 4.1 d | 1.34% | 3.61%  | GNSS-03 | ASC-02, DESC-07 |
+| 42  | 2.0  | 1.1  | 0.54% | 26.25% | 0.03% | 0.91% | 2.9 d | 0.01% | 4.69%  | GNSS-03 | ASC-02, DESC-07 |
+| 99  | 2.1  | 24.5 | 3.64% | 21.13% | 7.08% | 1.11% | 6.3 d | 0.14% | 3.64%  | GNSS-03 | ASC-02, DESC-07 |
+| 202 | 52.9 | 0.2  | 0.11% | 95.00% | 0.56% | 3.27% | 3.2 d | 2.76% | 3.52%  | GNSS-03, GNSS-05 | ASC-02, DESC-07 |
+| 555 | 1.8  | 52.1 | 1.07% | 9.93%  | 3.21% | 0.11% | 2.5 d | 0.52% | 0.18%  | GNSS-03 | ASC-02, DESC-07 |
+| 777 | 13.5 | 25.0 | 6.32% | 35.11% | 7.04% | 1.48% | 3.6 d | 0.43% | 6.74%  | GNSS-03 | ASC-02, DESC-07 |
+
+`volume_change_m3` is the McTigue source's total cumulative volume change
+(day 0 to the last day of record) -- the same `cumulative_dv_at(...)`
+quantity already computed internally to get the primary station's
+cumulative vertical displacement, simply reported directly rather than
+projected through a station's geometry. Its tolerance (40%, ~4x the
+observed 11.21% max) is looser than the station-level cumulative
+displacement's, because it inherits the same rate/breakpoint uncertainty
+without benefiting from cancellation against a specific station's own
+sensitivity factor.
 
 Point-estimate tolerances in `tests/test_outputs.py` are set at roughly a
 3-5x margin over the largest error observed here for every quantity except

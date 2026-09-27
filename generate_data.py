@@ -424,6 +424,7 @@ answer_key = {
     "true_vertical_rate_after_m_per_day_primary": float(true_rate_after_primary),
     "true_cumulative_vertical_displacement_m_primary": true_cumulative_vertical(primary_x, primary_y, 0, N_DAYS - 1),
     "true_cumulative_vertical_displacement_m_control": true_cumulative_vertical(control_x, control_y, 0, N_DAYS - 1),
+    "true_volume_change_m3": float(cumulative_dV(N_DAYS - 1)),
     "bad_gnss_station_id": "GNSS-03",
     "bad_gnss_local_drift_m_per_day": -0.00050,
     "unwrap_defect_interferograms": [
@@ -479,4 +480,5 @@ print(f"  true rate1 vertical rate @ GNSS-01: {true_rate_before_primary:.6e} m/d
 print(f"  true rate2 vertical rate @ GNSS-01: {true_rate_after_primary:.6e} m/day")
 print(f"  true cumulative vertical @ GNSS-01: {answer_key['true_cumulative_vertical_displacement_m_primary']:.4f} m")
 print(f"  true cumulative vertical @ GNSS-07 (control): {answer_key['true_cumulative_vertical_displacement_m_control']:.6f} m")
+print(f"  true total volume change: {answer_key['true_volume_change_m3']:.1f} m3")
 print(f"  unwrap defect interferograms: {answer_key['unwrap_defect_interferograms']}")

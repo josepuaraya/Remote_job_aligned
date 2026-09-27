@@ -793,6 +793,9 @@ def main():
             return mctigue_displacement(np.array([x]), np.array([y]), th[2], np.array([dv]), th[3], th[0], th[1])[2][0]
         return f
 
+    def f_volume_change(th):
+        return cumulative_dv_at(record_last_day, th[4], th[5], th[6])
+
     x0_hat, x0_ci = delta_ci(f_param(0), theta_hat, cov_theta)
     y0_hat, y0_ci = delta_ci(f_param(1), theta_hat, cov_theta)
     depth_hat, depth_ci = delta_ci(f_param(2), theta_hat, cov_theta)
@@ -802,6 +805,7 @@ def main():
     rate_after_hat, rate_after_ci = delta_ci(f_rate_after, theta_hat, cov_theta)
     cum_primary_hat, cum_primary_ci = delta_ci(f_cumulative(px, py), theta_hat, cov_theta)
     cum_control_hat, _ = delta_ci(f_cumulative(cx, cy), theta_hat, cov_theta)
+    volume_change_hat, volume_change_ci = delta_ci(f_volume_change, theta_hat, cov_theta)
 
     # ---------------- Final InSAR-vs-GNSS reconciliation (native LOS) ------
     sq_errors = []
@@ -833,10 +837,12 @@ def main():
         "vertical_rate_after_m_per_day": rate_after_hat,
         "rate_change_day": tb_hat,
         "cumulative_vertical_displacement_m": cum_primary_hat,
+        "volume_change_m3": volume_change_hat,
         "vertical_rate_before_uncertainty_95": rate_before_ci,
         "vertical_rate_after_uncertainty_95": rate_after_ci,
         "rate_change_day_uncertainty_95": tb_ci,
         "cumulative_vertical_displacement_uncertainty_95": cum_primary_ci,
+        "volume_change_uncertainty_95": volume_change_ci,
         "control_zone_cumulative_vertical_displacement_m": cum_control_hat,
         "insar_gnss_ramp_coefficients": {
             "ascending": {"constant_m": float(ramp_asc[0]), "gradient_x_m_per_m": float(ramp_asc[1]),
