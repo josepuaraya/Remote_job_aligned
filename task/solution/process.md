@@ -121,6 +121,26 @@ overlapping epochs, and the pooled RMSE across both tracks and all
 retained stations is reported as the final InSAR/GNSS reconciliation
 check.
 
+**Why `insar_gnss_ramp_coefficients` and `insar_gnss_rmse_m` are graded as
+format/sanity checks, not against a ground-truth value.** `generate_data.py`
+never injects a deliberate systematic ramp -- the ramp above is fitted to
+absorb the realization of spatially-correlated atmospheric noise near the
+tie epochs (`ATMOS_CORR_LENGTH_M`), which differs by seed and by which
+epochs/points a given implementation happens to use for the tie. There is
+no single "true" ramp coefficient the way there is a true `x0_m` or
+`depth_m`, so the verifier checks format and plausibility only
+(`test_ramp_coefficients_format`). Likewise, independently recomputing
+`insar_gnss_rmse_m` in the verifier would require re-running the
+InSAR-to-GNSS reconciliation using one specific method -- the reference
+solution's choice of epochs, station screening, and LOS projection -- which
+would fail a differently-implemented but scientifically valid
+reconciliation rather than testing the submission's science. The verifier
+instead checks the self-reported RMSE against a sanity cap
+(`test_insar_gnss_reconciliation_rmse_is_sane`, `RMSE_SANITY_CAP_M = 0.03`
+m vs. ~0.015 m observed at worst across the 8 calibration seeds), which
+still catches a submission that skipped the tie step or hardcoded a
+placeholder value.
+
 ## Calibration (eight independent noise realizations, same scenario)
 
 The reference solution was re-run against eight independent synthetic
