@@ -54,7 +54,7 @@
     "DESC-19"
   ],
   "ambiguity_quantum_m": 0.028,
-  "bad_gnss_local_drift_m_per_day": -0.0005,
+  "bad_gnss_local_drift_m_per_day": -0.00035,
   "bad_gnss_station_id": "GNSS-03",
   "control_station_id": "GNSS-07",
   "generator_notes": "Synthetic scenario for reviewer traceability. Never disclosed to the agent. See generate_data.py for the full generative model.",

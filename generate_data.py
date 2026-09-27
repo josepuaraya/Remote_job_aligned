@@ -224,10 +224,14 @@ _desc_chol_unit = build_spatial_cholesky(desc_x, desc_y, 1.0, ATMOS_CORR_LENGTH_
 # thresholded at its median -- an arbitrarily-shaped connected-ish region,
 # not a clean half-plane split, matching how a real unwrapping error
 # follows whatever patch of ground lost phase continuity).
-UNWRAP_MASK_CORR_LENGTH_M = 1800.0  # shorter than an earlier 5000.0 -- a patchier,
-# less spatially-coherent affected region, deliberately closer to the
-# spatial-coherence screen's own acceptance threshold so isolating the
-# genuine defect from ordinary atmospheric noise takes real work
+UNWRAP_MASK_CORR_LENGTH_M = 2500.0  # shorter than an earlier 5000.0 -- a patchier,
+# less spatially-coherent affected region, closer to the spatial-coherence
+# screen's own 0.6 acceptance threshold so isolating the genuine defect from
+# ordinary atmospheric noise takes real work. Empirically checked across 8
+# calibration seeds: minimum observed coherence 0.659 (seed 42, ASC), a real
+# but not razor-thin margin above 0.6 -- an earlier, shorter 1800.0 attempt
+# came within 0.025 of the threshold in one seed (777, ASC=0.625), too
+# fragile to keep.
 _asc_unwrap_field = build_spatial_cholesky(asc_x, asc_y, 1.0, UNWRAP_MASK_CORR_LENGTH_M) @ RNG.standard_normal(N_POINTS_ASC)
 _asc_unwrap_mask = _asc_unwrap_field > np.median(_asc_unwrap_field)
 _desc_unwrap_field = build_spatial_cholesky(desc_x, desc_y, 1.0, UNWRAP_MASK_CORR_LENGTH_M) @ RNG.standard_normal(N_POINTS_DESC)
@@ -359,7 +363,7 @@ GNSS_STATIONS = [
     # id,        x,      y,     day_start, day_end, white_en, white_up, local_drift_up_m_per_day
     ("GNSS-01",   300.0,  -150.0,   0, 330, 0.0025, 0.006, 0.0),
     ("GNSS-02",  -250.0,   400.0,   0, 330, 0.0025, 0.006, 0.0),
-    ("GNSS-03",   100.0,   350.0,   0, 330, 0.0040, 0.009, -0.00025),  # bad: quiet local drift
+    ("GNSS-03",   100.0,   350.0,   0, 330, 0.0040, 0.009, -0.00035),  # bad: quiet local drift
                                                                         # (deliberately smaller than an
                                                                         # earlier -0.00050 -- closer to the
                                                                         # detection floor, so excluding it
@@ -441,7 +445,9 @@ answer_key = {
     "true_cumulative_vertical_displacement_m_control": true_cumulative_vertical(control_x, control_y, 0, N_DAYS - 1),
     "true_volume_change_m3": float(cumulative_dV(N_DAYS - 1)),
     "bad_gnss_station_id": "GNSS-03",
-    "bad_gnss_local_drift_m_per_day": -0.00050,
+    "bad_gnss_local_drift_m_per_day": next(
+        drift_up for sid, *_, drift_up in GNSS_STATIONS if sid == "GNSS-03"
+    ),
     "unwrap_defect_interferograms": [
         rec["interferogram_id"] for rec in (answer_asc + answer_desc) if rec["has_unwrap_defect"]
     ],
