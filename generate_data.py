@@ -85,7 +85,12 @@ POISSON_RATIO = 0.25
 N_DAYS = 331  # days 0..330 inclusive
 TRUE_RATE_CHANGE_DAY = 165.0
 TRUE_RATE1_DV_M3_PER_DAY = 11000.0   # slower inflation, day 0 -> rate-change day
-TRUE_RATE2_DV_M3_PER_DAY = 24200.0   # faster inflation, rate-change day -> day 330
+TRUE_RATE2_DV_M3_PER_DAY = 15000.0   # faster inflation, rate-change day -> day 330
+                                      # (a ~36% contrast, deliberately subtler than an
+                                      # earlier 2.2x version -- detecting both WHEN and
+                                      # BY HOW MUCH the rate changed should require real
+                                      # statistical power against the noise floor, not
+                                      # be visually obvious in the raw record)
 
 DOMAIN_HALF_WIDTH_M = 15000.0
 
@@ -219,7 +224,10 @@ _desc_chol_unit = build_spatial_cholesky(desc_x, desc_y, 1.0, ATMOS_CORR_LENGTH_
 # thresholded at its median -- an arbitrarily-shaped connected-ish region,
 # not a clean half-plane split, matching how a real unwrapping error
 # follows whatever patch of ground lost phase continuity).
-UNWRAP_MASK_CORR_LENGTH_M = 5000.0
+UNWRAP_MASK_CORR_LENGTH_M = 1800.0  # shorter than an earlier 5000.0 -- a patchier,
+# less spatially-coherent affected region, deliberately closer to the
+# spatial-coherence screen's own acceptance threshold so isolating the
+# genuine defect from ordinary atmospheric noise takes real work
 _asc_unwrap_field = build_spatial_cholesky(asc_x, asc_y, 1.0, UNWRAP_MASK_CORR_LENGTH_M) @ RNG.standard_normal(N_POINTS_ASC)
 _asc_unwrap_mask = _asc_unwrap_field > np.median(_asc_unwrap_field)
 _desc_unwrap_field = build_spatial_cholesky(desc_x, desc_y, 1.0, UNWRAP_MASK_CORR_LENGTH_M) @ RNG.standard_normal(N_POINTS_DESC)
@@ -351,7 +359,12 @@ GNSS_STATIONS = [
     # id,        x,      y,     day_start, day_end, white_en, white_up, local_drift_up_m_per_day
     ("GNSS-01",   300.0,  -150.0,   0, 330, 0.0025, 0.006, 0.0),
     ("GNSS-02",  -250.0,   400.0,   0, 330, 0.0025, 0.006, 0.0),
-    ("GNSS-03",   100.0,   350.0,   0, 330, 0.0040, 0.009, -0.00050),  # bad: quiet local drift
+    ("GNSS-03",   100.0,   350.0,   0, 330, 0.0040, 0.009, -0.00025),  # bad: quiet local drift
+                                                                        # (deliberately smaller than an
+                                                                        # earlier -0.00050 -- closer to the
+                                                                        # detection floor, so excluding it
+                                                                        # takes a real trend/significance
+                                                                        # check, not an obvious outlier)
     ("GNSS-04",  1400.0,  -900.0, 140, 330, 0.0025, 0.006, 0.0),        # late start
     ("GNSS-05", -1500.0,  -700.0,   0, 250, 0.0025, 0.006, 0.0),        # early stop
     ("GNSS-06", 11000.0,  5000.0,   0, 330, 0.0025, 0.006, 0.0),        # far control
