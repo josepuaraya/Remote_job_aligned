@@ -59,7 +59,8 @@ gives one independent residual time series per station PER TRACK.
 
 A station is excluded only when BOTH tracks' independent residual trends
 agree it is significant (|z| > 3) AND large in absolute terms over its own
-record span (> 3.5 cm) -- a real local process (e.g. monument instability)
+record span (> 5 cm, `DRIFT_MAGNITUDE_FLOOR_M` in solve.py) -- a real local
+process (e.g. monument instability)
 projects into both LOS geometries since the two tracks' incidence angles
 are nearly identical, whereas one track's own reconstruction noise
 generally does not coincidentally reproduce the same trend in the other,
@@ -250,7 +251,7 @@ than requiring an exact match.
 fitted radius at its search-space lower bound (50 m vs. a true 1000 m, a
 95% error) while every other fitted quantity in that same seed lands
 well within tolerance -- a textbook sign of a flat/degenerate direction in
-the parameter space, not a broken fit. The delta-method CI correctly
+the parameter space, not a broken fit. The bootstrap CI correctly
 reflects this: in that seed it reports a width of about 49,000 m, two
 orders of magnitude wider than the ~50-130 m widths seen in well-behaved
 seeds. Because the correction radius mostly enters as a small (order
