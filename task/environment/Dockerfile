@@ -28,6 +28,14 @@ WORKDIR /workspace
 # Installing under /opt rather than /tmp is deliberate -- the runtime
 # overlays /tmp with an empty tmpfs and would erase anything left there
 # during the build.
+#
+# Do NOT move this install into tests/test.sh. It is already fully offline
+# (--no-index, vendored wheels only) at build time, so moving it changes
+# nothing about network access -- it would only make pytest/ctrf reinstall
+# on every single verifier run instead of once at image build. This install
+# has to happen in THIS Dockerfile specifically because agent and verifier
+# share one image here (see the file header) -- a generic "verifier deps
+# don't belong in the agent image" rule does not apply to this sandbox.
 COPY wheels/ /opt/wheels/
 
 RUN python -m pip install --no-cache-dir --no-index \
