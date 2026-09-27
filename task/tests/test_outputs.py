@@ -49,6 +49,7 @@ REQUIRED_KEYS = {
     "gnss_stations_used",
     "gnss_stations_excluded",
     "interferograms_with_unwrapping_correction",
+    "interferograms_excluded_from_inversion",
     "insar_gnss_rmse_m",
     "poisson_ratio_assumed",
 }
@@ -88,6 +89,8 @@ MAX_GNSS_EXCLUDED = 4     # max observed across 8 seeds was 2
 MAX_UNWRAP_FLAGGED = 4    # true count is 2; allow some slack for a
                           # differently-implemented method flagging one
                           # extra borderline interferogram
+MAX_UNWRAP_EXCLUDED = 4   # same slack, for a solution that drops rather
+                          # than repairs a defective interferogram
 
 
 @pytest.fixture(scope="module")
@@ -242,18 +245,36 @@ def test_gnss_bad_station_excluded(submitted, answer_key):
 
 
 def test_unwrap_defects_detected(submitted, answer_key):
+    # The instruction allows a genuinely defective interferogram to be
+    # either repaired or excluded from the inversion -- both are valid
+    # science. interferograms_with_unwrapping_correction covers the first;
+    # interferograms_excluded_from_inversion covers the second. A true
+    # defect just has to show up in one of the two, never both.
     flagged = submitted["interferograms_with_unwrapping_correction"]
+    excluded = submitted["interferograms_excluded_from_inversion"]
     assert isinstance(flagged, list)
+    assert isinstance(excluded, list)
     flagged_set = set(flagged)
+    excluded_set = set(excluded)
     all_ids = set(answer_key["all_interferogram_ids"])
     assert flagged_set.issubset(all_ids), f"unknown interferogram ids: {flagged_set - all_ids}"
+    assert excluded_set.issubset(all_ids), f"unknown interferogram ids: {excluded_set - all_ids}"
+    assert not (flagged_set & excluded_set), (
+        "an interferogram cannot be both corrected and excluded: "
+        f"{flagged_set & excluded_set}"
+    )
 
     true_defects = set(answer_key["unwrap_defect_interferograms"])
-    assert true_defects.issubset(flagged_set), (
-        f"must flag the genuine unwrapping-error interferograms {true_defects}, got {flagged_set}"
+    handled_set = flagged_set | excluded_set
+    assert true_defects.issubset(handled_set), (
+        f"must flag or exclude the genuine unwrapping-error interferograms "
+        f"{true_defects}, got flagged={flagged_set}, excluded={excluded_set}"
     )
     assert len(flagged_set) <= MAX_UNWRAP_FLAGGED, (
         f"too many interferograms flagged as unwrapping-corrected ({len(flagged_set)})"
+    )
+    assert len(excluded_set) <= MAX_UNWRAP_EXCLUDED, (
+        f"too many interferograms excluded for unwrapping ({len(excluded_set)})"
     )
 
 

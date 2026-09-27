@@ -42,7 +42,10 @@ Pipeline
    one station as "the" answer. A noisy-but-unbiased station is
    down-weighted by its own disclosed sigma, not excluded; only a station
    whose error is NOT explained by its own reported uncertainty (step 4)
-   is dropped. 95% CIs use the delta method from the fit's Jacobian.
+   is dropped. 95% CIs come from a parametric bootstrap over the full
+   pipeline (see run_full_pipeline / bootstrap_uncertainty below), not a
+   delta method -- an earlier delta-method version badly undercovered the
+   true value in direct empirical testing and was replaced.
 6. The fitted source's predicted vertical rate/displacement at the
    primary and control stations, and a final InSAR-vs-GNSS LOS RMSE at
    the retained stations, are reported as the reconciliation checks.
@@ -924,6 +927,7 @@ def main():
         "gnss_stations_used": point["used_stations"],
         "gnss_stations_excluded": point["excluded_stations"],
         "interferograms_with_unwrapping_correction": point["defect_ids"],
+        "interferograms_excluded_from_inversion": [],
         "insar_gnss_rmse_m": rmse,
         "poisson_ratio_assumed": POISSON_RATIO,
     }
