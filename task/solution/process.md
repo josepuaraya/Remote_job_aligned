@@ -276,25 +276,39 @@ physical plausibility (0 < radius < depth), and CI self-consistency --
 the same treatment this task gives other outputs where only the shape of
 the answer, not its precise value, is verified.
 
-**`insar_gnss_rmse_m` gets an independent cross-check, not just a self-report
-cap.** `test_insar_gnss_rmse_is_consistent_with_ramp` in test_outputs.py
-sidesteps needing to reproduce the submission's own SBAS/reconciliation
-method: for each track it uses only that track's single earliest
-interferogram known (from the private answer key) to be free of the
-injected unwrapping defect, so the "cumulative-since-epoch-0" InSAR value at
-any point is just that one interferogram's raw two-epoch measurement -- no
-network inversion needed. At each station the submission reports using, it
-averages the 8 nearest raw InSAR points, applies the submission's OWN
-disclosed ramp there, and compares against that station's own two-epoch
-GNSS displacement projected into the track's LOS. Calibrated against the
-reference solution on seeds 13, 7, and 42, this proxy landed at 0.6-1.4x the
-reference's own reported RMSE (noisier than the real value, since it rests
-on one interferogram pair instead of the full multi-epoch reconciliation);
-the verifier accepts a self-reported RMSE within 5x of the proxy in either
-direction, which comfortably clears that observed spread while still
-catching a self-report disconnected from the submission's own disclosed
-ramp and stations (verified against a hardcoded near-zero RMSE and a
-zeroed-out ramp still claiming a tiny RMSE -- both correctly rejected).
+**`insar_gnss_rmse_m` is self-reported against a sanity cap, not
+independently recomputed -- tried the opposite, reverted after trajectory
+evidence.** An independent cross-check was added at one point: for each
+track, take the single earliest interferogram known (from the private
+answer key) to be free of the injected unwrapping defect -- a raw two-epoch
+measurement needing no SBAS reconstruction -- average the 8 nearest points
+at each station the submission reports using, apply the submission's own
+disclosed ramp, and compare against that station's own two-epoch GNSS
+displacement projected into the track's LOS. Calibrated against the
+reference solution (seeds 13, 7, 42) this proxy landed at 0.6-1.4x the
+reference's own reported RMSE, so the self-report was required to fall
+within 5x of the proxy in either direction.
+
+Live trajectory review across 12 agent trials found this rejected 7 of 8
+claude-opus/codex trials, all of which had every other check correct
+(source location, depth, rates, volume, GNSS QC, unwrapping-defect
+handling) and used a MORE rigorous method than this reference solution: a
+GNSS-regularized joint inversion that ties InSAR to GNSS during time-series
+reconstruction rather than via a separate post-hoc planar ramp. Their
+genuinely tighter tie residuals (self-reported RMSE 5-9x below the proxy)
+were flagged as "inconsistent" purely because the proxy's own noise floor
+-- inherent to using one unaveraged interferogram pair -- sits around
+15-20 mm, well above what a proper multi-epoch reconciliation can
+legitimately achieve (GNSS sigmas here go down to 2.5 mm; averaging over
+the full record pushes a good submission's real RMSE toward that floor,
+not the proxy's noisier one). No band width fixes this: it isn't a
+calibration error, it's that the proxy's architecture (post-hoc ramp on raw
+single-pair pixel data) only matches one specific reconciliation style and
+can't validate a method that ties GNSS a different way. Reverted to
+self-report + sanity cap. This is the same category of risk flagged
+(theoretically, before this) every time a self-reported field was proposed
+for independent recomputation -- confirmed here with real trajectory data
+rather than argued from first principles.
 
 ## Ablations run to validate (not just assert) where the difficulty lives
 
