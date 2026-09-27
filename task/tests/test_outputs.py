@@ -76,7 +76,8 @@ CONTROL_ABS_TOL_M = 0.010
 LOCATION_CI_WIDTH_CAP_M = 250.0           # max observed (8 seeds) ~70.2 m
 DEPTH_CI_WIDTH_CAP_FRAC = 0.30            # max observed (8 seeds) ~8.8%
 RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.55      # max observed (8 seeds) ~17.4%
-RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.08       # max observed (8 seeds) ~2.3%
+RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.30       # see note below -- NOT a ~3.5x margin
+                                           # like its neighbors
 RATE_CHANGE_DAY_CI_WIDTH_CAP = 50.0       # max observed (8 seeds) ~13.9 days
 CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.12       # max observed (8 seeds) ~3.4%
 VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.55    # max observed (8 seeds) ~16.6%
@@ -84,6 +85,18 @@ VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.55    # max observed (8 seeds) ~16.6%
 RADIUS_CI_WIDTH_SANITY_CAP_M = 2.0e5  # radius is weakly identified (see above) and a
 # genuinely honest CI can be tens of thousands of meters wide (observed up to ~50,000 m
 # across 8 seeds); this only catches a degenerate placeholder (e.g. bounds of +/-1e9).
+
+# rate_after gets the same weak-coverage treatment as radius, for a documented
+# reason (process.md's coverage table): the reference bootstrap's own CI for
+# rate_after covered the true value in only 2/8 calibration seeds, well below
+# nominal -- unlike every other quantity above, which cleared 4/8 or better.
+# That means the bootstrap itself is known to underestimate rate_after's true
+# uncertainty, so using ITS width (even with the same ~3.5x margin used
+# elsewhere) as the cap would risk rejecting a differently-implemented,
+# honestly-wider CI for exactly the quantity where "honestly wider" is most
+# likely to be correct. 30% keeps the cap meaningful (still rejects a
+# degenerate/placeholder interval) without leaning on a margin computed from
+# a method with demonstrated poor coverage for this specific quantity.
 RMSE_SANITY_CAP_M = 0.03  # max observed across 8 seeds was ~0.015 m
 MAX_GNSS_EXCLUDED = 4     # max observed across 8 seeds was 2
 MAX_UNWRAP_FLAGGED = 4    # true count is 2; allow some slack for a

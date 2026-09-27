@@ -210,7 +210,7 @@ seeds:
 | depth | 4/8 | 8.8% of point | 30% | ~3.4x |
 | radius | 5/8 | up to ~1770% of point (seed 202) | 200,000 m | n/a |
 | rate-before | 6/8 | 17.4% of point | 55% | ~3.2x |
-| rate-after | 2/8 | 2.3% of point | 8% | ~3.5x |
+| rate-after | 2/8 | 2.3% of point | 30% | n/a (see below) |
 | rate-change day | 6/8 | 13.9 d | 50 d | ~3.6x |
 | cumulative displacement | 7/8 | 3.4% of point | 12% | ~3.5x |
 | volume change | 5/8 | 16.6% of point | 55% | ~3.3x |
@@ -237,6 +237,17 @@ result. Radius keeps its own, much looser cap (200,000 m, unrelated to the
 oversight, it reflects genuine weak identifiability, and its bootstrap
 width in seed 202 alone (about 49,000 m, two-to-three orders of magnitude
 wider than well-behaved seeds) would blow through a normally-scaled cap.
+
+`rate-after` gets the same "not a ~3x margin" treatment as radius, for a
+distinct but related reason: its own 2/8 coverage means the bootstrap width
+itself is known to be too narrow for this quantity, so a ~3.5x margin over
+a too-narrow number is not a safe bound the way it is for the other
+quantities (whose bootstraps cleared 4/8+ coverage). Rather than encode a
+cap derived from a demonstrably under-covering distribution, `rate-after`'s
+cap (30% of the point estimate) is set loose enough to not reject a
+genuinely honest, appropriately-wider CI, while still catching a degenerate
+placeholder -- the same posture as radius, applied for the analogous
+reason.
 
 The genuinely defective interferograms (ASC-02,
 DESC-07) and GNSS station (GNSS-03) are correctly identified in every

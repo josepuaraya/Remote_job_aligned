@@ -38,14 +38,22 @@ RUN python -m pip install --no-cache-dir --no-index \
 COPY data/ ${DATA_DIR}/
 
 # The sandbox runs one container and executes both the agent and the verifier
-# as this unprivileged user, so every directory either step writes to has to be
-# owned by it. That includes the whole /logs tree the harness collects from:
-# naming only ${LOG_DIR} leaves /logs itself root-owned, so the agent cannot
-# create /logs/agent and its output redirect fails before the solution runs.
-# The symptom is a trial that dies with no artifacts and no reward file.
+# as this unprivileged user, so every directory either step WRITES to has to
+# be owned by it. That includes the whole /logs tree the harness collects
+# from: naming only ${LOG_DIR} leaves /logs itself root-owned, so the agent
+# cannot create /logs/agent and its output redirect fails before the solution
+# runs. The symptom is a trial that dies with no artifacts and no reward file.
+#
+# ${TESTS_DIR} is deliberately NOT chowned to agent. test_outputs.py and the
+# private answer key are dropped into it after the agent's turn ends, and the
+# agent process only ever needs to READ them (via pytest, still run as this
+# same user) -- it never writes there. Left root-owned at its default 755,
+# the directory stays traversable/readable for pytest's later read while the
+# agent cannot create or overwrite files in it during its own turn (e.g. a
+# planted conftest.py that would silently neuter the verifier).
 RUN useradd --create-home --shell /bin/bash agent \
     && mkdir -p ${WORKSPACE_DIR} ${DATA_DIR} ${OUTPUT_DIR} ${SOLUTION_DIR} \
         ${TESTS_DIR} /logs /logs/agent /logs/artifacts ${LOG_DIR} \
-    && chown -R agent:agent ${WORKSPACE_DIR} ${SOLUTION_DIR} ${TESTS_DIR} /logs
+    && chown -R agent:agent ${WORKSPACE_DIR} ${SOLUTION_DIR} /logs
 
 USER agent
