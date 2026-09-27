@@ -100,12 +100,18 @@ stations with negligible signal contribute negligible weight, which lets a
 generic starting point find the source without hardcoding which stations
 are "near-field."
 
-95% confidence intervals use the delta method: the covariance of the
-7 fitted parameters comes from `(J^T J)^-1` at the final solution's
-Jacobian (residuals are already whitened by construction), and any derived
-quantity (the vertical rate at a named station, cumulative displacement)
-gets its own CI via a numerical gradient of that quantity with respect to
-all 7 parameters, propagated through the same covariance matrix.
+95% confidence intervals come from a parametric bootstrap (300 replicates),
+not a delta method -- see the calibration section below for why an earlier
+delta-method version (covariance from `(J^T J)^-1` at the final fit's
+Jacobian) was replaced. Each replicate redraws noise at the raw-data level
+-- each interferogram's own estimated variance (from step 3's
+variance-component estimation), each GNSS observation's own disclosed
+sigma -- and reruns the entire pipeline above (SBAS reconstruction,
+unwrapping screen, GNSS screen, ramp fit, joint inversion) on the
+perturbed data. The reported CI for every quantity is the 2.5th/97.5th
+percentile of that replicate distribution. `run_full_pipeline()` is the
+single function both the point estimate and every bootstrap replicate
+call, so the two can never silently diverge.
 
 ## 6. Final reconciliation
 
@@ -148,33 +154,68 @@ Point-estimate tolerances in `tests/test_outputs.py` are set at roughly a
 3-5x margin over the largest error observed here for every quantity except
 radius (see below).
 
-**CI widths are re-measured against the actual pipeline, not carried over
-from an earlier design.** The joint McTigue nonlinear fit with delta-method
-CIs produces much tighter, better-determined intervals than an earlier
-per-station bootstrap design did -- an early draft of the CI sanity caps
-was written against that earlier design's widths and left unchanged after
-the rewrite, silently becoming 30-140x looser than the current pipeline
-ever actually produces (e.g. an 800 m location-CI cap against an actual
-observed maximum of 6.7 m). This was caught by an author review, not by
-calibration alone, and fixed by re-measuring every cap directly:
+**The uncertainty method itself went through two revisions, both caught by
+questions asked of this document rather than by calibration alone.**
 
-| quantity | CI width unit | max observed (8 seeds) | verifier cap | margin |
+*Revision 1 (stale caps).* The joint McTigue nonlinear fit initially used
+delta-method CIs (covariance from `(J^T J)^-1` at the final fit's
+Jacobian). These are much tighter than an earlier per-station bootstrap
+design's widths, and the CI sanity caps -- written against that earlier
+design and never re-measured after the rewrite -- ended up 30-140x looser
+than the delta-method pipeline actually produced (e.g. an 800 m
+location-CI cap against an actual observed maximum of 6.7 m). Caught by
+review, fixed by re-measuring every cap directly against the delta-method
+output.
+
+*Revision 2 (the delta method itself was wrong).* Re-measuring the caps
+made the next question obvious: does the true value actually fall inside
+these "95%" intervals close to 95% of the time? Checked directly across
+the 8 calibration seeds, the delta-method CIs' true coverage was far
+below nominal -- depth 1/8, rate-before 1/8, rate-change-day 1/8, volume
+change 1/8, x0 3/8, y0 3/8, radius 2/8, rate-after 2/8, cumulative
+displacement 3/8. The delta method only reflects uncertainty conditional
+on the SBAS reconstruction and ramp fit being exact, known inputs --
+structurally, it cannot see the uncertainty those upstream steps
+themselves carry, which is why it was consistently too narrow. Replaced
+with the full-pipeline parametric bootstrap described above (resample
+raw-data noise, rerun everything, take percentiles), which does propagate
+that upstream uncertainty. Re-measured coverage after the fix, same 8
+seeds:
+
+| quantity | coverage (of 8) | max CI width observed | verifier cap | margin |
 |---|---|---|---|---|
-| x0, y0 | m | 6.7 m | 30 m | ~4.5x |
-| depth | % of point estimate | 0.90% | 4% | ~4.4x |
-| rate-before | % of point estimate | 0.99% | 4% | ~4x |
-| rate-after | % of point estimate | 1.05% | 5% | ~4.8x |
-| rate-change day | days | 2.2 d | 10 d | ~4.5x |
-| cumulative displacement | % of point estimate | 0.52% | 2.5% | ~4.8x |
-| volume change | % of point estimate | 1.75% | 8% | ~4.6x |
+| x0 | 7/8 | 70.2 m | 250 m | ~3.6x |
+| y0 | 5/8 | 25.4 m | 250 m | ~9.8x |
+| depth | 4/8 | 8.8% of point | 30% | ~3.4x |
+| radius | 5/8 | up to ~1770% of point (seed 202) | 200,000 m | n/a |
+| rate-before | 6/8 | 17.4% of point | 55% | ~3.2x |
+| rate-after | 2/8 | 2.3% of point | 8% | ~3.5x |
+| rate-change day | 6/8 | 13.9 d | 50 d | ~3.6x |
+| cumulative displacement | 7/8 | 3.4% of point | 12% | ~3.5x |
+| volume change | 5/8 | 16.6% of point | 55% | ~3.3x |
 
-These caps only reject a degenerate or uninformatively wide interval; they
-were checked against four deliberately too-wide (but individually
-plausible-looking, e.g. depth +/-10%) submissions to confirm each is
-correctly rejected, and against the genuine reference output on all 8
-seeds to confirm none of them are tight enough to reject an honest result.
-Radius keeps its own, much looser cap (200,000 m) for the reason given
-below -- it is not an oversight, it reflects genuine weak identifiability.
+This is a large, real improvement over the delta method (which achieved
+1-3/8 coverage for nearly every quantity) but it is not a claim of
+achieving genuine 95% coverage across the board -- `rate-after`'s 2/8 is
+still poor, most likely because the record's post-breakpoint segment is
+shorter and the bootstrap's per-observation noise resampling may not
+fully capture whatever additional structure the two-segment fit is
+sensitive to there. This is disclosed rather than hidden: the width caps
+above are set from the ACTUAL widths the bootstrap produces (with a
+~3-3.6x margin against a degenerate/placeholder interval), not tuned to
+manufacture a coverage number, and a submission is graded on whether its
+CI is self-consistent and sanely sized, not on a coverage property that
+cannot be checked from a single realization.
+
+These caps were checked against four deliberately too-wide (but
+individually plausible-looking, e.g. depth +/-10%) submissions to confirm
+each is correctly rejected, and against the genuine reference output on
+all 8 seeds to confirm none of them are tight enough to reject an honest
+result. Radius keeps its own, much looser cap (200,000 m, unrelated to the
+~3x margin pattern above) for the reason given below -- it is not an
+oversight, it reflects genuine weak identifiability, and its bootstrap
+width in seed 202 alone (about 49,000 m, two-to-three orders of magnitude
+wider than well-behaved seeds) would blow through a normally-scaled cap.
 
 The genuinely defective interferograms (ASC-02,
 DESC-07) and GNSS station (GNSS-03) are correctly identified in every

@@ -65,22 +65,19 @@ CUMULATIVE_REL_TOL = 0.12
 VOLUME_CHANGE_REL_TOL = 0.40  # max observed across 8 seeds was 11.21%
 CONTROL_ABS_TOL_M = 0.010
 
-# CI sanity caps. INTERIM values as of this commit: solve.py's uncertainty
-# method was just switched from a delta-method CI (found to badly
-# undercover the true value -- as low as 1/8 seeds against a nominal 95%,
-# see process.md) to a parametric bootstrap that resamples the whole
-# pipeline, which produces much wider, honest intervals. These caps are
-# set from a single seed's bootstrap output with a generous ~3x safety
-# margin as an interim measure; a full 8-seed re-calibration is in
-# progress and will tighten (or, if seed-to-seed spread is wider than this
-# one seed suggests, loosen) these to a properly justified margin.
-LOCATION_CI_WIDTH_CAP_M = 150.0           # seed 13 bootstrap observed ~42 m
-DEPTH_CI_WIDTH_CAP_FRAC = 0.25            # seed 13 bootstrap observed ~8.5%
-RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.40      # seed 13 bootstrap observed ~14.6%
-RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.15       # seed 13 bootstrap observed ~2.0%
-RATE_CHANGE_DAY_CI_WIDTH_CAP = 40.0       # seed 13 bootstrap observed ~11.5 days
-CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.10       # seed 13 bootstrap observed ~2.5%
-VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.35    # seed 13 bootstrap observed ~12.2%
+# CI sanity caps, re-measured across all 8 calibration seeds against the
+# current parametric-bootstrap uncertainty method (see process.md for the
+# full width table and the true-value coverage rate per quantity -- these
+# caps only reject a degenerate/placeholder-wide interval, at roughly a
+# 3-3.6x margin over the largest width the bootstrap actually produced;
+# they are not, and are not meant to be, a coverage guarantee).
+LOCATION_CI_WIDTH_CAP_M = 250.0           # max observed (8 seeds) ~70.2 m
+DEPTH_CI_WIDTH_CAP_FRAC = 0.30            # max observed (8 seeds) ~8.8%
+RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.55      # max observed (8 seeds) ~17.4%
+RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.08       # max observed (8 seeds) ~2.3%
+RATE_CHANGE_DAY_CI_WIDTH_CAP = 50.0       # max observed (8 seeds) ~13.9 days
+CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.12       # max observed (8 seeds) ~3.4%
+VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.55    # max observed (8 seeds) ~16.6%
 
 RADIUS_CI_WIDTH_SANITY_CAP_M = 2.0e5  # radius is weakly identified (see above) and a
 # genuinely honest CI can be tens of thousands of meters wide (observed up to ~50,000 m
