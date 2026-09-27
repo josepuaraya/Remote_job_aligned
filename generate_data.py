@@ -96,7 +96,8 @@ ASC_HEADING_DEG = -11.876832
 DESC_INCIDENCE_DEG = 39.1840
 DESC_HEADING_DEG = -168.27934
 
-AMBIGUITY_QUANTUM_M = 0.028  # ~ half C-band wavelength; one unwrapping cycle
+SAR_WAVELENGTH_M = 0.056  # C-band (Sentinel-1-like); disclosed in interferogram_metadata.csv
+AMBIGUITY_QUANTUM_M = SAR_WAVELENGTH_M / 2.0  # one LOS unwrapping cycle = half the wavelength
 
 
 def cumulative_dV(day):
@@ -319,6 +320,7 @@ def build_track(track_name, x, y, epoch_days, unwrap_edge, noisy_idx, chol_unit,
             "interferogram_id": ifg_id, "orbit": orbit_name,
             "day_start": int(day0), "day_end": int(day1),
             "incidence_deg": incidence_deg, "heading_deg": heading_deg,
+            "wavelength_m": SAR_WAVELENGTH_M,
         })
         answer_edges.append({
             "interferogram_id": ifg_id, "epoch_i": i, "epoch_j": j,
@@ -456,7 +458,8 @@ def write_csv(path, rows, fieldnames):
 
 
 ifg_fields = ["interferogram_id", "point_id", "x_m", "y_m", "elevation_m", "los_displacement_m"]
-meta_fields = ["interferogram_id", "orbit", "day_start", "day_end", "incidence_deg", "heading_deg"]
+meta_fields = ["interferogram_id", "orbit", "day_start", "day_end", "incidence_deg", "heading_deg",
+               "wavelength_m"]
 gnss_ts_fields = [
     "station_id", "day", "east_disp_m", "north_disp_m", "vertical_disp_m",
     "east_sigma_m", "north_sigma_m", "vertical_sigma_m",

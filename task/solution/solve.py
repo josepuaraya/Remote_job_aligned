@@ -61,7 +61,6 @@ WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/workspace")
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(WORKSPACE_DIR, "data"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(WORKSPACE_DIR, "output"))
 
-AMBIGUITY_QUANTUM_M = 0.028  # disclosed SAR system constant (half-wavelength)
 PRIMARY_STATION_ID = "GNSS-01"
 CONTROL_STATION_ID = "GNSS-07"
 POISSON_RATIO = 0.25
@@ -127,6 +126,10 @@ class Track:
         meta_rows = [m for m in meta_rows if m["orbit"] == name]
         self.incidence_deg = float(meta_rows[0]["incidence_deg"])
         self.heading_deg = float(meta_rows[0]["heading_deg"])
+        # Ambiguity quantum is not assumed: it is derived from the disclosed
+        # SAR wavelength in interferogram_metadata.csv (one LOS unwrapping
+        # cycle = half the wavelength).
+        self.ambiguity_quantum_m = float(meta_rows[0]["wavelength_m"]) / 2.0
 
         days = sorted({int(m["day_start"]) for m in meta_rows} | {int(m["day_end"]) for m in meta_rows})
         self.epoch_days = days
@@ -259,6 +262,7 @@ def detect_and_correct_unwrap_defect(track, los=None):
     """
     if los is None:
         los = track.los
+    ambiguity_quantum_m = track.ambiguity_quantum_m
     triangles = find_triangles(track)
     edge_point_contribs = defaultdict(lambda: defaultdict(list))  # ifg_id -> point -> [contribs]
     for id_ij, id_jk, id_ik, i, j, k in triangles:
@@ -276,9 +280,9 @@ def detect_and_correct_unwrap_defect(track, los=None):
         pts = np.array(sorted(point_map.keys()))
         vals = np.array([np.mean(point_map[p]) for p in pts])
 
-        centers, assign, _ = _two_cluster_split(vals, AMBIGUITY_QUANTUM_M)
+        centers, assign, _ = _two_cluster_split(vals, ambiguity_quantum_m)
         sep = abs(centers[1] - centers[0])
-        if not (0.5 * AMBIGUITY_QUANTUM_M < sep < 1.5 * AMBIGUITY_QUANTUM_M):
+        if not (0.5 * ambiguity_quantum_m < sep < 1.5 * ambiguity_quantum_m):
             continue
         far_cluster = int(np.argmax(np.abs(centers)))
         local_mask = assign == far_cluster
@@ -294,7 +298,7 @@ def detect_and_correct_unwrap_defect(track, los=None):
         if coherence <= 0.6:
             continue
 
-        n_cycles = float(np.round(centers[far_cluster] / AMBIGUITY_QUANTUM_M))
+        n_cycles = float(np.round(centers[far_cluster] / ambiguity_quantum_m))
         candidates.append((ifg_id, pts[local_mask], n_cycles, coherence * sep))
 
     corrected_los = {ifg_id: dict(d) for ifg_id, d in los.items()}
@@ -307,7 +311,7 @@ def detect_and_correct_unwrap_defect(track, los=None):
         trial = {k: dict(v) for k, v in los.items()}
         for p in mask_points:
             if p in trial[ifg_id]:
-                trial[ifg_id][p] -= n_cycles * AMBIGUITY_QUANTUM_M
+                trial[ifg_id][p] -= n_cycles * ambiguity_quantum_m
         sse = _all_triangle_closures(track, trial, triangles)
         if sse < best_sse:
             best_edge, best_mask_points, best_n, best_sse = ifg_id, mask_points, n_cycles, sse
@@ -318,7 +322,7 @@ def detect_and_correct_unwrap_defect(track, los=None):
     if best_edge is not None and best_sse < 0.5 * baseline_sse:
         for p in best_mask_points:
             if p in corrected_los[best_edge]:
-                corrected_los[best_edge][p] -= best_n * AMBIGUITY_QUANTUM_M
+                corrected_los[best_edge][p] -= best_n * ambiguity_quantum_m
         return corrected_los, best_edge
     return corrected_los, None
 
