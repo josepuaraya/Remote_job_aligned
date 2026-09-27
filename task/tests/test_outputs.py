@@ -50,6 +50,7 @@ REQUIRED_KEYS = {
     "gnss_stations_excluded",
     "interferograms_with_unwrapping_correction",
     "insar_gnss_rmse_m",
+    "poisson_ratio_assumed",
 }
 
 # Point-estimate tolerances (see process.md calibration table: max observed
@@ -253,6 +254,12 @@ def test_unwrap_defects_detected(submitted, answer_key):
     )
     assert len(flagged_set) <= MAX_UNWRAP_FLAGGED, (
         f"too many interferograms flagged as unwrapping-corrected ({len(flagged_set)})"
+    )
+
+
+def test_poisson_ratio_matches_spec(submitted):
+    assert abs(float(submitted["poisson_ratio_assumed"]) - 0.25) < 1e-6, (
+        "poisson_ratio_assumed must equal 0.25, the disclosed modeling assumption"
     )
 
 

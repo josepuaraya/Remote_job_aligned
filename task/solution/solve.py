@@ -921,6 +921,7 @@ def main():
         "gnss_stations_excluded": point["excluded_stations"],
         "interferograms_with_unwrapping_correction": point["defect_ids"],
         "insar_gnss_rmse_m": rmse,
+        "poisson_ratio_assumed": POISSON_RATIO,
     }
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
