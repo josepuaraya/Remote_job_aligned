@@ -146,7 +146,37 @@ sensitivity factor.
 
 Point-estimate tolerances in `tests/test_outputs.py` are set at roughly a
 3-5x margin over the largest error observed here for every quantity except
-radius (see below). The genuinely defective interferograms (ASC-02,
+radius (see below).
+
+**CI widths are re-measured against the actual pipeline, not carried over
+from an earlier design.** The joint McTigue nonlinear fit with delta-method
+CIs produces much tighter, better-determined intervals than an earlier
+per-station bootstrap design did -- an early draft of the CI sanity caps
+was written against that earlier design's widths and left unchanged after
+the rewrite, silently becoming 30-140x looser than the current pipeline
+ever actually produces (e.g. an 800 m location-CI cap against an actual
+observed maximum of 6.7 m). This was caught by an author review, not by
+calibration alone, and fixed by re-measuring every cap directly:
+
+| quantity | CI width unit | max observed (8 seeds) | verifier cap | margin |
+|---|---|---|---|---|
+| x0, y0 | m | 6.7 m | 30 m | ~4.5x |
+| depth | % of point estimate | 0.90% | 4% | ~4.4x |
+| rate-before | % of point estimate | 0.99% | 4% | ~4x |
+| rate-after | % of point estimate | 1.05% | 5% | ~4.8x |
+| rate-change day | days | 2.2 d | 10 d | ~4.5x |
+| cumulative displacement | % of point estimate | 0.52% | 2.5% | ~4.8x |
+| volume change | % of point estimate | 1.75% | 8% | ~4.6x |
+
+These caps only reject a degenerate or uninformatively wide interval; they
+were checked against four deliberately too-wide (but individually
+plausible-looking, e.g. depth +/-10%) submissions to confirm each is
+correctly rejected, and against the genuine reference output on all 8
+seeds to confirm none of them are tight enough to reject an honest result.
+Radius keeps its own, much looser cap (200,000 m) for the reason given
+below -- it is not an oversight, it reflects genuine weak identifiability.
+
+The genuinely defective interferograms (ASC-02,
 DESC-07) and GNSS station (GNSS-03) are correctly identified in every
 realization; seed 202 additionally excludes one legitimately good
 mid-field station (GNSS-05) whose own reconstruction noise happened to

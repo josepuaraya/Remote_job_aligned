@@ -66,14 +66,17 @@ VOLUME_CHANGE_REL_TOL = 0.40  # max observed across 8 seeds was 11.21%
 CONTROL_ABS_TOL_M = 0.010
 
 # CI sanity caps (max observed width/point-estimate ratio, or width in
-# days, across 8 seeds).
-LOCATION_CI_WIDTH_CAP_M = 800.0
-DEPTH_CI_WIDTH_CAP_FRAC = 0.5
-RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.5
-RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.3
-RATE_CHANGE_DAY_CI_WIDTH_CAP = 80.0
-CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.15
-VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.10  # max observed width/point across 8 seeds was ~1.7%
+# days, across 8 seeds -- the joint McTigue delta-method fit produces much
+# tighter, well-determined CIs than an earlier per-station bootstrap design
+# did; these caps were re-measured directly against the current pipeline's
+# actual output, not carried over from that earlier design).
+LOCATION_CI_WIDTH_CAP_M = 30.0            # max observed ~6.7 m
+DEPTH_CI_WIDTH_CAP_FRAC = 0.04            # max observed ~0.90%
+RATE_BEFORE_CI_WIDTH_CAP_FRAC = 0.04      # max observed ~0.99%
+RATE_AFTER_CI_WIDTH_CAP_FRAC = 0.05       # max observed ~1.05%
+RATE_CHANGE_DAY_CI_WIDTH_CAP = 10.0       # max observed ~2.2 days
+CUMULATIVE_CI_WIDTH_CAP_FRAC = 0.025      # max observed ~0.52%
+VOLUME_CHANGE_CI_WIDTH_CAP_FRAC = 0.08    # max observed ~1.75%
 
 RADIUS_CI_WIDTH_SANITY_CAP_M = 2.0e5  # radius is weakly identified (see above) and a
 # genuinely honest CI can be tens of thousands of meters wide (observed up to ~50,000 m
