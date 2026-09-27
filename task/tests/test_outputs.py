@@ -14,9 +14,14 @@ at its search boundary) -- radius is therefore checked for format and
 self-consistency only, not point-estimate accuracy, the same treatment
 Task3-style tasks give other weakly-identified-by-design outputs.
 
-Nothing here is a pasted expected value -- everything is recomputed from
-task/tests/data/answer_key.json (the private ground truth) or from the
-public data files also copied into task/tests/data/.
+Nothing here is a pasted expected value -- every check compares the
+submission against task/tests/data/answer_key.json (the private ground
+truth). task/tests/data/ also holds a private copy of the same public CSVs
+shipped to the agent (interferograms.csv, interferogram_metadata.csv,
+gnss_stations.csv, gnss_timeseries.csv) -- generate_data.py writes both
+copies for the author's own reproducibility -- but this verifier does not
+read them; every assertion here is against answer_key.json and the
+submitted result.json alone.
 """
 from __future__ import annotations
 
