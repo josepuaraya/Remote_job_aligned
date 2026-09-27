@@ -231,8 +231,10 @@ def _all_triangle_closures(track, los, triangles):
     return total
 
 
-def detect_and_correct_unwrap_defect(track):
+def detect_and_correct_unwrap_defect(track, los=None):
     """Loop-closure screen. Returns (corrected_los_dict, defect_edge_id_or_None).
+    `los` defaults to the track's own observed data; a bootstrap replicate
+    passes a perturbed copy instead, without mutating the original.
 
     Stage 1 (screen): for each edge, per-point loop closures (pooled over
     every closed triangle containing that edge) are split into two 1-D
@@ -255,12 +257,14 @@ def detect_and_correct_unwrap_defect(track):
     lowest total network-wide closure sum-of-squares after its proposed
     correction is accepted.
     """
+    if los is None:
+        los = track.los
     triangles = find_triangles(track)
     edge_point_contribs = defaultdict(lambda: defaultdict(list))  # ifg_id -> point -> [contribs]
     for id_ij, id_jk, id_ik, i, j, k in triangles:
-        common = set(track.los[id_ij]) & set(track.los[id_jk]) & set(track.los[id_ik])
+        common = set(los[id_ij]) & set(los[id_jk]) & set(los[id_ik])
         for p in common:
-            closure = track.los[id_ij][p] + track.los[id_jk][p] - track.los[id_ik][p]
+            closure = los[id_ij][p] + los[id_jk][p] - los[id_ik][p]
             edge_point_contribs[id_ij][p].append(closure)
             edge_point_contribs[id_jk][p].append(closure)
             edge_point_contribs[id_ik][p].append(-closure)
@@ -293,14 +297,14 @@ def detect_and_correct_unwrap_defect(track):
         n_cycles = float(np.round(centers[far_cluster] / AMBIGUITY_QUANTUM_M))
         candidates.append((ifg_id, pts[local_mask], n_cycles, coherence * sep))
 
-    corrected_los = {ifg_id: dict(d) for ifg_id, d in track.los.items()}
+    corrected_los = {ifg_id: dict(d) for ifg_id, d in los.items()}
     if not candidates:
         return corrected_los, None
 
-    baseline_sse = _all_triangle_closures(track, track.los, triangles)
+    baseline_sse = _all_triangle_closures(track, los, triangles)
     best_edge, best_mask_points, best_n, best_sse = None, None, 0, baseline_sse
     for ifg_id, mask_points, n_cycles, _score in candidates:
-        trial = {k: dict(v) for k, v in track.los.items()}
+        trial = {k: dict(v) for k, v in los.items()}
         for p in mask_points:
             if p in trial[ifg_id]:
                 trial[ifg_id][p] -= n_cycles * AMBIGUITY_QUANTUM_M
@@ -399,8 +403,8 @@ def estimate_edge_variances(track, los, cum):
     return variances
 
 
-def run_track_pipeline(track):
-    corrected_los, defect_edge = detect_and_correct_unwrap_defect(track)
+def run_track_pipeline(track, los=None):
+    corrected_los, defect_edge = detect_and_correct_unwrap_defect(track, los=los)
     cum0 = invert_time_series(track, corrected_los)
     variances = estimate_edge_variances(track, corrected_los, cum0)
     weights = {k: 1.0 / v for k, v in variances.items()}
@@ -656,48 +660,23 @@ def run_joint_inversion(gnss_data, insar_data, used_gnss_stations, stations, gns
     return final.x, cov
 
 
-Z95 = 1.959963984540054
-
-
-def delta_ci(f, theta_hat, cov_theta):
-    theta_hat = np.asarray(theta_hat, dtype=float)
-    n = len(theta_hat)
-    grad = np.zeros(n)
-    for i in range(n):
-        step = 1e-5 * max(abs(theta_hat[i]), 1.0)
-        tp, tm = theta_hat.copy(), theta_hat.copy()
-        tp[i] += step
-        tm[i] -= step
-        grad[i] = (f(tp) - f(tm)) / (2 * step)
-    var = float(grad @ cov_theta @ grad)
-    se = float(np.sqrt(max(var, 0.0)))
-    val = float(f(theta_hat))
-    return val, [val - Z95 * se, val + Z95 * se]
-
-
 # ---------------------------------------------------------------------------
-# Main
+# Full pipeline as one reusable call (point estimate AND every bootstrap
+# replicate call this same function, so "what the point estimate did" and
+# "what got resampled" can never silently drift apart).
 # ---------------------------------------------------------------------------
-def main():
-    ifg_rows, meta_rows, station_rows, gnss_rows = load_data()
-
-    asc = Track("ascending", meta_rows, ifg_rows)
-    desc = Track("descending", meta_rows, ifg_rows)
-
-    cum_asc, defect_asc, var_asc = run_track_pipeline(asc)
-    cum_desc, defect_desc, var_desc = run_track_pipeline(desc)
+def run_full_pipeline(asc, desc, stations, station_ids, gnss_series, record_last_day,
+                       asc_los=None, desc_los=None, x0_guess=None, y0_guess=None):
+    cum_asc, defect_asc, var_asc = run_track_pipeline(asc, los=asc_los)
+    cum_desc, defect_desc, var_desc = run_track_pipeline(desc, los=desc_los)
     defect_ids = [d for d in (defect_asc, defect_desc) if d is not None]
 
-    stations, gnss_series = load_gnss(station_rows, gnss_rows)
-    station_ids = sorted(stations.keys())
     sx = np.array([stations[s][0] for s in station_ids])
     sy = np.array([stations[s][1] for s in station_ids])
-    record_last_day = max(int(r["day"]) for r in gnss_rows)
 
     raw_asc_at_stations = local_linear_interpolate(asc, cum_asc, sx, sy)
     raw_desc_at_stations = local_linear_interpolate(desc, cum_desc, sx, sy)
 
-    # ---------------- Per-track GNSS screening (native LOS domain) ---------
     asc_screen = per_track_station_screen(asc, raw_asc_at_stations, station_ids, stations, gnss_series)
     desc_screen = per_track_station_screen(desc, raw_desc_at_stations, station_ids, stations, gnss_series)
 
@@ -714,13 +693,11 @@ def main():
     ramp_asc = fit_ramp(asc_intercepts, asc_intercept_ses, list(asc_intercepts), stations)
     ramp_desc = fit_ramp(desc_intercepts, desc_intercept_ses, list(desc_intercepts), stations)
 
-    # ---------------- Apply per-track ramp correction everywhere -----------
     corrected_cum_asc = cum_asc - ramp_value(ramp_asc, asc.x, asc.y)[:, None]
     corrected_cum_desc = cum_desc - ramp_value(ramp_desc, desc.x, desc.y)[:, None]
     corrected_asc_at_stations = raw_asc_at_stations - ramp_value(ramp_asc, sx, sy)[:, None]
     corrected_desc_at_stations = raw_desc_at_stations - ramp_value(ramp_desc, sx, sy)[:, None]
 
-    # ---------------- Assemble GNSS data for the joint inversion -----------
     gnss_data = []
     for sid in used_stations:
         rows = gnss_series[sid]
@@ -733,14 +710,12 @@ def main():
             "sigu": np.array([r[6] for r in rows]),
         })
 
-    # ---------------- Assemble a near-field InSAR sample --------------------
-    x0_guess, y0_guess = initial_guess(used_stations, stations, gnss_series, record_last_day)[:2]
+    if x0_guess is None or y0_guess is None:
+        x0_guess, y0_guess = initial_guess(used_stations, stations, gnss_series, record_last_day)[:2]
     insar_pooled_sigma_asc = float(np.sqrt(np.mean(list(var_asc.values())))) if var_asc else 0.005
     insar_pooled_sigma_desc = float(np.sqrt(np.mean(list(var_desc.values())))) if var_desc else 0.005
 
     def sample_insar(track, corrected_cum, pooled_sigma):
-        """One batched entry per track (arrays, not one dict per point-epoch
-        pair) so the model is evaluated vectorized, not looped in Python."""
         d2 = (track.x - x0_guess) ** 2 + (track.y - y0_guess) ** 2
         near = np.where(d2 < INSAR_NEAR_FIELD_RADIUS_M ** 2)[0]
         if len(near) > INSAR_MAX_POINTS_PER_TRACK:
@@ -770,51 +745,141 @@ def main():
         ) if d is not None
     ]
 
-    # ---------------- Joint McTigue source + rate-history inversion --------
-    theta_hat, cov_theta = run_joint_inversion(
+    theta_hat, _cov_unused = run_joint_inversion(
         gnss_data, insar_data, used_stations, stations, gnss_series, record_last_day
     )
 
+    return {
+        "theta": theta_hat,
+        "used_stations": used_stations,
+        "excluded_stations": excluded_stations,
+        "defect_ids": defect_ids,
+        "ramp_asc": ramp_asc, "ramp_desc": ramp_desc,
+        "corrected_asc_at_stations": corrected_asc_at_stations,
+        "corrected_desc_at_stations": corrected_desc_at_stations,
+        "var_asc": var_asc, "var_desc": var_desc,
+        "x0_guess": x0_guess, "y0_guess": y0_guess,
+    }
+
+
+def derived_quantities(theta, record_last_day, px, py):
+    x0, y0, depth, radius, rate1, rate2, tb = theta
+    rate_before = mctigue_displacement(np.array([px]), np.array([py]), depth, np.array([rate1]), radius, x0, y0)[2][0]
+    rate_after = mctigue_displacement(np.array([px]), np.array([py]), depth, np.array([rate2]), radius, x0, y0)[2][0]
+    volume_change = float(cumulative_dv_at(record_last_day, rate1, rate2, tb))
+    cumulative = mctigue_displacement(
+        np.array([px]), np.array([py]), depth, np.array([volume_change]), radius, x0, y0
+    )[2][0]
+    return float(rate_before), float(rate_after), volume_change, float(cumulative)
+
+
+# ---------------------------------------------------------------------------
+# Parametric bootstrap uncertainty: resamples noise at the raw-data level
+# (each interferogram's own estimated variance; each GNSS observation's own
+# disclosed sigma) and reruns the ENTIRE pipeline -- SBAS reconstruction,
+# unwrapping screen, GNSS screen, ramp fit, and joint inversion -- per
+# replicate. A delta-method CI from only the final nonlinear fit's Jacobian
+# was tried first and found to badly undercover the true value (as low as
+# 1/8 realizations for several quantities, against a nominal 95%): it only
+# reflects uncertainty conditional on the upstream SBAS/ramp results being
+# exact, which they are not. Resampling the whole pipeline is what actually
+# propagates that upstream uncertainty into the final interval.
+# ---------------------------------------------------------------------------
+def perturb_track_los(los, variances, rng):
+    perturbed = {}
+    for ifg_id, point_map in los.items():
+        sigma = np.sqrt(variances.get(ifg_id, 1e-6))
+        perturbed[ifg_id] = {p: val + rng.normal(0.0, sigma) for p, val in point_map.items()}
+    return perturbed
+
+
+def perturb_gnss_series(gnss_series, rng):
+    perturbed = {}
+    for sid, rows in gnss_series.items():
+        perturbed[sid] = [
+            (day, e + rng.normal(0.0, sige), n + rng.normal(0.0, sign), u + rng.normal(0.0, sigu),
+             sige, sign, sigu)
+            for (day, e, n, u, sige, sign, sigu) in rows
+        ]
+    return perturbed
+
+
+N_BOOTSTRAP = 300
+
+
+def bootstrap_uncertainty(asc, desc, stations, station_ids, gnss_series, record_last_day,
+                           var_asc, var_desc, x0_guess, y0_guess, px, py, n_boot=N_BOOTSTRAP, seed=20260926):
+    rng = np.random.default_rng(seed)
+    keys = ["x0", "y0", "depth", "radius", "rate_before", "rate_after", "tb", "cum_primary", "volume_change"]
+    samples = {k: [] for k in keys}
+    for _ in range(n_boot):
+        asc_los_b = perturb_track_los(asc.los, var_asc, rng)
+        desc_los_b = perturb_track_los(desc.los, var_desc, rng)
+        gnss_b = perturb_gnss_series(gnss_series, rng)
+        try:
+            result = run_full_pipeline(
+                asc, desc, stations, station_ids, gnss_b, record_last_day,
+                asc_los=asc_los_b, desc_los=desc_los_b, x0_guess=x0_guess, y0_guess=y0_guess,
+            )
+        except Exception:
+            continue
+        th = result["theta"]
+        rate_before, rate_after, volume_change, cum_primary = derived_quantities(th, record_last_day, px, py)
+        samples["x0"].append(th[0])
+        samples["y0"].append(th[1])
+        samples["depth"].append(th[2])
+        samples["radius"].append(th[3])
+        samples["tb"].append(th[6])
+        samples["rate_before"].append(rate_before)
+        samples["rate_after"].append(rate_after)
+        samples["cum_primary"].append(cum_primary)
+        samples["volume_change"].append(volume_change)
+
+    cis = {}
+    for k, vals in samples.items():
+        if len(vals) < 10:
+            cis[k] = [float("nan"), float("nan")]
+        else:
+            lo, hi = np.percentile(vals, [2.5, 97.5])
+            cis[k] = [float(lo), float(hi)]
+    return cis
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    ifg_rows, meta_rows, station_rows, gnss_rows = load_data()
+
+    asc = Track("ascending", meta_rows, ifg_rows)
+    desc = Track("descending", meta_rows, ifg_rows)
+    stations, gnss_series = load_gnss(station_rows, gnss_rows)
+    station_ids = sorted(stations.keys())
+    record_last_day = max(int(r["day"]) for r in gnss_rows)
+
+    point = run_full_pipeline(asc, desc, stations, station_ids, gnss_series, record_last_day)
+    theta_hat = point["theta"]
+
     px, py = stations[PRIMARY_STATION_ID]
     cx, cy = stations[CONTROL_STATION_ID]
+    rate_before_hat, rate_after_hat, volume_change_hat, cum_primary_hat = derived_quantities(
+        theta_hat, record_last_day, px, py
+    )
+    _, _, _, cum_control_hat = derived_quantities(theta_hat, record_last_day, cx, cy)
 
-    def f_param(i):
-        return lambda th: th[i]
-
-    def f_rate_before(th):
-        return mctigue_displacement(np.array([px]), np.array([py]), th[2], np.array([th[4]]), th[3], th[0], th[1])[2][0]
-
-    def f_rate_after(th):
-        return mctigue_displacement(np.array([px]), np.array([py]), th[2], np.array([th[5]]), th[3], th[0], th[1])[2][0]
-
-    def f_cumulative(x, y):
-        def f(th):
-            dv = cumulative_dv_at(record_last_day, th[4], th[5], th[6])
-            return mctigue_displacement(np.array([x]), np.array([y]), th[2], np.array([dv]), th[3], th[0], th[1])[2][0]
-        return f
-
-    def f_volume_change(th):
-        return cumulative_dv_at(record_last_day, th[4], th[5], th[6])
-
-    x0_hat, x0_ci = delta_ci(f_param(0), theta_hat, cov_theta)
-    y0_hat, y0_ci = delta_ci(f_param(1), theta_hat, cov_theta)
-    depth_hat, depth_ci = delta_ci(f_param(2), theta_hat, cov_theta)
-    radius_hat, radius_ci = delta_ci(f_param(3), theta_hat, cov_theta)
-    tb_hat, tb_ci = delta_ci(f_param(6), theta_hat, cov_theta)
-    rate_before_hat, rate_before_ci = delta_ci(f_rate_before, theta_hat, cov_theta)
-    rate_after_hat, rate_after_ci = delta_ci(f_rate_after, theta_hat, cov_theta)
-    cum_primary_hat, cum_primary_ci = delta_ci(f_cumulative(px, py), theta_hat, cov_theta)
-    cum_control_hat, _ = delta_ci(f_cumulative(cx, cy), theta_hat, cov_theta)
-    volume_change_hat, volume_change_ci = delta_ci(f_volume_change, theta_hat, cov_theta)
+    # ---------------- Uncertainty: parametric bootstrap of the WHOLE pipeline
+    cis = bootstrap_uncertainty(
+        asc, desc, stations, station_ids, gnss_series, record_last_day,
+        point["var_asc"], point["var_desc"], point["x0_guess"], point["y0_guess"], px, py,
+    )
 
     # ---------------- Final InSAR-vs-GNSS reconciliation (native LOS) ------
     sq_errors = []
-    for track, corrected_at_stations, screen in (
-        (asc, corrected_asc_at_stations, asc_screen), (desc, corrected_desc_at_stations, desc_screen)
+    for track, corrected_at_stations in (
+        (asc, point["corrected_asc_at_stations"]), (desc, point["corrected_desc_at_stations"])
     ):
-        epoch_days = np.array(track.epoch_days, dtype=float)
         for k, sid in enumerate(station_ids):
-            if sid not in used_stations:
+            if sid not in point["used_stations"]:
                 continue
             raw = corrected_at_stations[k]
             valid = ~np.isnan(raw)
@@ -829,20 +894,22 @@ def main():
             sq_errors.extend(((raw[valid] - pred_los[valid]) ** 2).tolist())
     rmse = float(np.sqrt(np.mean(sq_errors))) if sq_errors else float("nan")
 
+    ramp_asc, ramp_desc = point["ramp_asc"], point["ramp_desc"]
     result = {
-        "x0_m": x0_hat, "y0_m": y0_hat, "depth_m": depth_hat, "radius_m": radius_hat,
-        "x0_uncertainty_95": x0_ci, "y0_uncertainty_95": y0_ci,
-        "depth_uncertainty_95": depth_ci, "radius_uncertainty_95": radius_ci,
+        "x0_m": float(theta_hat[0]), "y0_m": float(theta_hat[1]),
+        "depth_m": float(theta_hat[2]), "radius_m": float(theta_hat[3]),
+        "x0_uncertainty_95": cis["x0"], "y0_uncertainty_95": cis["y0"],
+        "depth_uncertainty_95": cis["depth"], "radius_uncertainty_95": cis["radius"],
         "vertical_rate_before_m_per_day": rate_before_hat,
         "vertical_rate_after_m_per_day": rate_after_hat,
-        "rate_change_day": tb_hat,
+        "rate_change_day": float(theta_hat[6]),
         "cumulative_vertical_displacement_m": cum_primary_hat,
         "volume_change_m3": volume_change_hat,
-        "vertical_rate_before_uncertainty_95": rate_before_ci,
-        "vertical_rate_after_uncertainty_95": rate_after_ci,
-        "rate_change_day_uncertainty_95": tb_ci,
-        "cumulative_vertical_displacement_uncertainty_95": cum_primary_ci,
-        "volume_change_uncertainty_95": volume_change_ci,
+        "vertical_rate_before_uncertainty_95": cis["rate_before"],
+        "vertical_rate_after_uncertainty_95": cis["rate_after"],
+        "rate_change_day_uncertainty_95": cis["tb"],
+        "cumulative_vertical_displacement_uncertainty_95": cis["cum_primary"],
+        "volume_change_uncertainty_95": cis["volume_change"],
         "control_zone_cumulative_vertical_displacement_m": cum_control_hat,
         "insar_gnss_ramp_coefficients": {
             "ascending": {"constant_m": float(ramp_asc[0]), "gradient_x_m_per_m": float(ramp_asc[1]),
@@ -850,9 +917,9 @@ def main():
             "descending": {"constant_m": float(ramp_desc[0]), "gradient_x_m_per_m": float(ramp_desc[1]),
                            "gradient_y_m_per_m": float(ramp_desc[2])},
         },
-        "gnss_stations_used": used_stations,
-        "gnss_stations_excluded": excluded_stations,
-        "interferograms_with_unwrapping_correction": defect_ids,
+        "gnss_stations_used": point["used_stations"],
+        "gnss_stations_excluded": point["excluded_stations"],
+        "interferograms_with_unwrapping_correction": point["defect_ids"],
         "insar_gnss_rmse_m": rmse,
     }
 
