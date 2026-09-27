@@ -25,16 +25,19 @@ submitted result.json alone.
 """
 from __future__ import annotations
 
+import csv
 import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/workspace/output"))
 TESTS_DIR = Path(os.environ.get("TESTS_DIR", "/tests"))
 RESULT_PATH = OUTPUT_DIR / "result.json"
 ANSWER_KEY_PATH = TESTS_DIR / "data" / "answer_key.json"
+PUBLIC_DATA_DIR = TESTS_DIR / "data"
 
 REQUIRED_KEYS = {
     "x0_m", "y0_m", "depth_m", "radius_m",
@@ -121,6 +124,24 @@ def answer_key() -> dict:
 def submitted() -> dict:
     assert RESULT_PATH.exists(), f"missing output: {RESULT_PATH}"
     return json.loads(RESULT_PATH.read_text())
+
+
+def _load_csv(path: Path) -> list[dict]:
+    with open(path) as fh:
+        return list(csv.DictReader(fh))
+
+
+@pytest.fixture(scope="module")
+def public_data() -> dict:
+    # The same public CSVs shipped to the agent, from this verifier's own
+    # private copy -- used only by test_insar_gnss_rmse_is_consistent_with_ramp
+    # below, to independently cross-check a self-reported number.
+    return {
+        "interferograms": _load_csv(PUBLIC_DATA_DIR / "interferograms.csv"),
+        "interferogram_metadata": _load_csv(PUBLIC_DATA_DIR / "interferogram_metadata.csv"),
+        "gnss_stations": _load_csv(PUBLIC_DATA_DIR / "gnss_stations.csv"),
+        "gnss_timeseries": _load_csv(PUBLIC_DATA_DIR / "gnss_timeseries.csv"),
+    }
 
 
 def _ci(submitted, key):
@@ -323,8 +344,8 @@ def test_ramp_coefficients_format(submitted):
             assert v == v and abs(v) < 1e6, f"insar_gnss_ramp_coefficients['{track}']['{k}'] is not sane"
 
 
-# insar_gnss_rmse_m is checked via self-report against a sanity cap rather
-# than independently recomputed, by design: an independent recomputation
+# insar_gnss_rmse_m is checked via self-report against a sanity cap, not
+# independently recomputed the "exact" way, by design: a full recomputation
 # would require the verifier to re-run the InSAR-to-GNSS reconciliation
 # itself (which epochs/points to compare, how to project GNSS into each
 # track's LOS, which stations to trust) using ONE specific method -- the
@@ -334,6 +355,9 @@ def test_ramp_coefficients_format(submitted):
 # submission that never applied a meaningful correction at all (e.g. a
 # hardcoded/placeholder RMSE, or skipping the tie step), since the max
 # observed across all 8 calibration seeds was ~0.015 m against a 0.03 m cap.
+# See test_insar_gnss_rmse_is_consistent_with_ramp below for a separate,
+# coarser but genuinely independent cross-check against the submission's
+# own disclosed ramp and used stations.
 def test_insar_gnss_reconciliation_rmse_is_sane(submitted):
     rmse = float(submitted["insar_gnss_rmse_m"])
     assert rmse == rmse and rmse >= 0.0, "insar_gnss_rmse_m must be a finite, non-negative number"
@@ -341,4 +365,124 @@ def test_insar_gnss_reconciliation_rmse_is_sane(submitted):
         f"insar_gnss_rmse_m={rmse} exceeds the sanity cap ({RMSE_SANITY_CAP_M} m); "
         "this indicates the InSAR-to-GNSS reference-frame correction was not "
         "meaningfully applied"
+    )
+
+
+RMSE_PROXY_K_NEAREST = 8
+RMSE_PROXY_BAND_FACTOR = 5.0
+
+
+def _los_projection_full(ue, un, uu, incidence_deg, heading_deg):
+    theta = np.radians(incidence_deg)
+    alpha = np.radians(heading_deg)
+    return (np.sin(theta) * np.cos(alpha) * ue
+            - np.sin(theta) * np.sin(alpha) * un
+            - np.cos(theta) * uu)
+
+
+def _ramp_value_from_submission(track_ramp: dict, x: float, y: float) -> float:
+    return (float(track_ramp["constant_m"])
+            + float(track_ramp["gradient_x_m_per_m"]) * x
+            + float(track_ramp["gradient_y_m_per_m"]) * y)
+
+
+def _earliest_clean_interferogram(meta_rows, orbit, defect_ids):
+    rows = [m for m in meta_rows if m["orbit"] == orbit and m["interferogram_id"] not in defect_ids]
+    rows.sort(key=lambda m: (int(m["day_start"]), int(m["day_end"])))
+    return rows[0]
+
+
+def _gnss_disp_at_day(rows, day):
+    days = np.array([float(r["day"]) for r in rows])
+    order = np.argsort(days)
+    days = days[order]
+    e = np.array([float(r["east_disp_m"]) for r in rows])[order]
+    n = np.array([float(r["north_disp_m"]) for r in rows])[order]
+    u = np.array([float(r["vertical_disp_m"]) for r in rows])[order]
+    return np.interp(day, days, e), np.interp(day, days, n), np.interp(day, days, u)
+
+
+# This is a SEPARATE, genuinely independent cross-check on insar_gnss_rmse_m
+# (see the rationale above for why a full, exact recomputation isn't done).
+# It sidesteps needing to reproduce the submission's own SBAS/reconciliation
+# method entirely: for each track, it takes only that track's single
+# EARLIEST interferogram known (from the private answer key) to be free of
+# the injected unwrapping defect, so a "cumulative-since-epoch-0" InSAR value
+# at any point is just that one interferogram's raw two-epoch measurement --
+# no network inversion needed. At each station the submission itself
+# reports using, it averages the K nearest raw InSAR points, applies the
+# submission's OWN disclosed ramp at that averaged location, and compares
+# against that same station's own two-epoch GNSS displacement (day_start to
+# day_end) projected into the track's LOS. Pooled across all used stations
+# and both tracks, this gives a coarse proxy RMSE.
+#
+# This proxy is deliberately noisier than a well-implemented submission's own
+# reported RMSE -- it rests on a single interferogram pair per track instead
+# of a full multi-epoch reconciliation, so individual-station noise (the
+# genuinely noisy-but-honest near-field stations especially) isn't averaged
+# down nearly as much. Calibration against the reference solution across 3
+# seeds (13, 7, 42) showed this proxy landing anywhere from ~0.6x to ~1.4x
+# the reference's own reported RMSE. RMSE_PROXY_BAND_FACTOR=5 leaves roughly
+# 3.5x of headroom beyond that observed spread in both directions -- loose
+# enough not to penalize a differently-implemented, honest reconciliation,
+# while still catching a self-report that bears no relation to the
+# submission's own disclosed ramp and stations (e.g. hardcoded or copied
+# from an unrelated computation).
+def test_insar_gnss_rmse_is_consistent_with_ramp(submitted, answer_key, public_data):
+    ramp = submitted["insar_gnss_ramp_coefficients"]
+    used = submitted["gnss_stations_used"]
+    submitted_rmse = float(submitted["insar_gnss_rmse_m"])
+
+    station_xy = {
+        s["station_id"]: (float(s["x_m"]), float(s["y_m"]))
+        for s in public_data["gnss_stations"]
+    }
+    ts_by_station: dict = {}
+    for r in public_data["gnss_timeseries"]:
+        ts_by_station.setdefault(r["station_id"], []).append(r)
+
+    by_ifg: dict = {}
+    for r in public_data["interferograms"]:
+        by_ifg.setdefault(r["interferogram_id"], []).append(r)
+
+    defect_ids = set(answer_key["unwrap_defect_interferograms"])
+
+    residuals = []
+    for orbit in ("ascending", "descending"):
+        info = _earliest_clean_interferogram(public_data["interferogram_metadata"], orbit, defect_ids)
+        ifg_id = info["interferogram_id"]
+        day0, day1 = int(info["day_start"]), int(info["day_end"])
+        incidence, heading = float(info["incidence_deg"]), float(info["heading_deg"])
+        track_ramp = ramp[orbit]
+
+        pts = by_ifg[ifg_id]
+        xs = np.array([float(p["x_m"]) for p in pts])
+        ys = np.array([float(p["y_m"]) for p in pts])
+        los = np.array([float(p["los_displacement_m"]) for p in pts])
+
+        for sid in used:
+            if sid not in station_xy or sid not in ts_by_station:
+                continue
+            sx, sy = station_xy[sid]
+            dist = np.sqrt((xs - sx) ** 2 + (ys - sy) ** 2)
+            idx = np.argsort(dist)[:RMSE_PROXY_K_NEAREST]
+            raw_insar = float(los[idx].mean())
+            px, py = float(xs[idx].mean()), float(ys[idx].mean())
+            corrected = raw_insar - _ramp_value_from_submission(track_ramp, px, py)
+
+            e0, n0, u0 = _gnss_disp_at_day(ts_by_station[sid], day0)
+            e1, n1, u1 = _gnss_disp_at_day(ts_by_station[sid], day1)
+            predicted_gnss = float(_los_projection_full(e1 - e0, n1 - n0, u1 - u0, incidence, heading))
+
+            residuals.append(corrected - predicted_gnss)
+
+    assert residuals, "could not independently cross-check insar_gnss_rmse_m: no used station matched public data"
+    proxy_rmse = float(np.sqrt(np.mean(np.square(residuals))))
+    floor = 0.001  # avoid a degenerate band if the proxy itself lands near zero by chance
+    lo = max(proxy_rmse, floor) / RMSE_PROXY_BAND_FACTOR
+    hi = max(proxy_rmse, floor) * RMSE_PROXY_BAND_FACTOR
+    assert lo <= submitted_rmse <= hi, (
+        f"insar_gnss_rmse_m={submitted_rmse} is inconsistent with an independent proxy "
+        f"({proxy_rmse:.5f} m) recomputed from the submission's own disclosed ramp "
+        f"coefficients and used stations -- expected roughly {lo:.5f} to {hi:.5f} m"
     )

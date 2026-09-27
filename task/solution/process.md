@@ -276,6 +276,26 @@ physical plausibility (0 < radius < depth), and CI self-consistency --
 the same treatment this task gives other outputs where only the shape of
 the answer, not its precise value, is verified.
 
+**`insar_gnss_rmse_m` gets an independent cross-check, not just a self-report
+cap.** `test_insar_gnss_rmse_is_consistent_with_ramp` in test_outputs.py
+sidesteps needing to reproduce the submission's own SBAS/reconciliation
+method: for each track it uses only that track's single earliest
+interferogram known (from the private answer key) to be free of the
+injected unwrapping defect, so the "cumulative-since-epoch-0" InSAR value at
+any point is just that one interferogram's raw two-epoch measurement -- no
+network inversion needed. At each station the submission reports using, it
+averages the 8 nearest raw InSAR points, applies the submission's OWN
+disclosed ramp there, and compares against that station's own two-epoch
+GNSS displacement projected into the track's LOS. Calibrated against the
+reference solution on seeds 13, 7, and 42, this proxy landed at 0.6-1.4x the
+reference's own reported RMSE (noisier than the real value, since it rests
+on one interferogram pair instead of the full multi-epoch reconciliation);
+the verifier accepts a self-reported RMSE within 5x of the proxy in either
+direction, which comfortably clears that observed spread while still
+catching a self-report disconnected from the submission's own disclosed
+ramp and stations (verified against a hardcoded near-zero RMSE and a
+zeroed-out ramp still claiming a tiny RMSE -- both correctly rejected).
+
 ## Ablations run to validate (not just assert) where the difficulty lives
 
 Three specific "an agent might take a shortcut here" hypotheses were each
